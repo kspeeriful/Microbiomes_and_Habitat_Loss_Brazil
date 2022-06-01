@@ -1,0 +1,296 @@
+####QIIME2 PROCESSING of RAW READS####
+#These commands were used to process raw 16S rRNA reads in QIIME2 prior to using 
+#phyloseq for downstream analysis. QIIME2 was run on a high performance computing cluster
+#at the American Museum of Natural History. Within these commands, the directory paths
+#are specific to this computing system. All .qvz and metadata files are available on Github - Kelly Speer
+
+####DOWNLOAD SEQUENCE DATA####
+#Download all reads from NCBI SRA (https://www.ncbi.nlm.nih.gov/sra)
+#Each sample has two fastq.gz files, one forward and one reverse.
+
+#To compress directory:
+zip -r BrazilBatFlyMicrob.zip <name of directory where reads were dowloaded>
+
+#Use scp to copy compressed directory onto high performance computing cluster:
+#Navigate to compressed directory on cluster
+
+#Extract files:
+unzip -q BrazilBatFlyMicrob.zip
+
+####ACTIVATE QIIME2####
+#The below is to activate version 2018.2, which was used to process data for publication.
+#To activate the QIIME2 environment and enable tab completion:
+source activate qiime2-2018.2
+source tab-qiime
+
+####IMPORT DATA TO QIIME2####
+#Import Data into QIIME2 (https://docs.qiime2.org/2018.2/tutorials/importing/):
+qiime tools import \
+  --type 'SampleData[PairedEndSequencesWithQuality]' \
+  --input-path BrazilBatFlyMicrob/ \
+  --source-format CasavaOneEightSingleLanePerSampleDirFmt \
+  --output-path demux-paired-end.qza
+
+Summarize Demultiplexed Data:
+qiime demux summarize \
+  --i-data demux-paired-end.qza \
+  --o-visualization demux-paired-end.qzv
+
+####VIZUALIZE DATA IN QIIME2 VIEW####
+#Download deumux-paired-end.qzv from cluster:
+#View in QIIME2 View (https://view.qiime2.org/)
+
+#Find the values for --p-trim-left m (m bases you want to cut off the left side of the
+#sequence) and --p-trunc-len n (n position at which the sequence is truncated), which are needed
+#as input for DADA2 (Follow instructions in https://docs.qiime2.org/2018.2/tutorials/atacama-soils/).
+#Generally, you want your read lengths to be long enough that the forward and reverse reads
+#overlap, but you want to eliminate low quality bases.
+
+####DENOISING IN DADA2 USING 200BP FORWARD CUT AND 180BP REVERSE CUT####
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs demux-paired-end.qza \
+  --o-table table-final \
+  --o-representative-sequences rep-seqs-final \
+  --p-trim-left-f 0 \
+  --p-trim-left-r 0 \
+  --p-trunc-len-f 200 \
+  --p-trunc-len-r 180
+
+#Summarize the output feature tables to explore the results of the filtering steps:
+qiime feature-table summarize \
+  --i-table table-final.qza \
+  --o-visualization table-final.qzv \
+  --m-sample-metadata-file BrazilBatFlyMicrobMetadata.tsv
+qiime feature-table tabulate-seqs \
+  --i-data rep-seqs-final.qza \
+  --o-visualization rep-seqs-final.qzv
+
+#Secure copy summary tables to local computer to view on QIIME2View (https://view.qiime2.org/):
+#This trimming yielded 2,088 features. However, many of the features are only found in 1 sample at low frequency.
+
+####ID SEQUENCE VARIANTS IN PCR(-) AND EXT(-)####
+#https://docs.qiime2.org/2018.2/tutorials/feature-classifier/
+#Secure copy the sequence fasta and taxonomy from the GreenGenes v13_5 database onto high performance computing cluster
+
+#Import Greegenes reference taxonomy and fasta file as QIIME 2 Artifacts:
+qiime tools import \
+  --type 'FeatureData[Sequence]' \
+  --input-path gg_13_5.fasta \
+  --output-path gg_13_5.qza
+
+#qiime tools import \
+  --type 'FeatureData[Taxonomy]' \
+  --source-format HeaderlessTSVTaxonomyFormat \
+  --input-path gg_13_5_taxonomy.txt \
+  --output-path gg_13_5_taxonomy.qza
+
+#Trim the imported reference sequences to the appropriate length using the f primer and r primer to target the region
+#and the length of the reads to trim to the sequenced region:
+qiime feature-classifier extract-reads \
+  --i-sequences gg_13_5.qza \
+  --p-f-primer GTGYCAGCMGCCGCGGTAA \
+  --p-r-primer GGACTACNVGGGTWTCTAAT \
+  --p-trunc-len 250 \
+  --o-reads ref-seqs.qza
+
+#Train the Naive Bayes classifier using the reference reads that were just trimmed and the taxonomy.
+#I requested ncpus=16, mem=36gb, walltime=48:00:00 for this job
+source activate qiime2-2018.2
+cd /home/kspeer/array1/BrazilBatFlyMicrobiomeAnalysis/training-feature-classifiers
+qiime feature-classifier fit-classifier-naive-bayes \
+  --i-reference-reads ref-seqs.qza \
+  --i-reference-taxonomy gg_13_5_taxonomy.qza \
+  --o-classifier classifier.qza
+
+#Run the trained classifier on the data
+qiime feature-classifier classify-sklearn \
+  --i-classifier classifier.qza \
+  --i-reads /home/kspeer/array1/BrazilBatFlyMicrobiomeAnalysis/rep-seqs-final.qza \
+  --o-classification taxonomy_unfiltered.qza
+
+#Summarize the results of the taxonomic assignments for visualization in QIIME 2 View:
+qiime metadata tabulate \
+  --m-input-file taxonomy_unfiltered.qza \
+  --o-visualization taxonomy_unfiltered.qzv
+
+#To view interactive bar plots of the data:
+qiime taxa barplot \
+  --i-table /home/kspeer/array1/BrazilBatFlyMicrobiomeAnalysis/table-final.qza \
+  --i-taxonomy taxonomy_unfiltered.qza \
+  --m-metadata-file /home/kspeer/array1/BrazilBatFlyMicrobiomeAnalysis/BrazilBatFlyMicrobMetadata.tsv \
+  --o-visualization taxa-bar-plots_unfiltered.qzv
+
+#Secure copy .qvz files to local computer to view on https://view.qiime2.org/
+#Bar plots reveal several sequence variants in the Ext(-) and the PCR(-) shows only 5. Due to the cross-indexing
+#issues known from illumina sequencing, it is not a good idea to eliminate all OTUs found in a (-). Some of these
+#are likely just the result of of cross-indexing of the most abundant OTUs. 
+#In QIIME2 View, download CSV of taxonomic IDs at Level-6 (genus-level).
+#The below OTUs are recommended for removal based on their presence in a (-), only ID'd to phylum, extremely low abundance and representation,
+#and improbability of occuring in bat flies:
+
+####FILTER Contaminants####
+#https://docs.qiime2.org/2018.2/tutorials/filtering/
+#The PCR- and Ext- samples each retained some sequence variants. To eliminate these, we use the filter tools in QIIME 2(https://docs.qiime2.org/2018.2/tutorials/filtering/)
+#Some taxa can be eliminated using the --p-mode contains (default) setting, because they have a unique
+#enough identifier that they will not incorrectly eliminate non-target taxa if we exclude them by targeting only a small
+#portion of their taxon ID. 
+#First, Eliminate all known contaminants (you don't need to check that they are in your data, just remove them if they are there) Citation Eisenhofer et al. 2019
+qiime taxa filter-seqs \
+  --i-sequences rep-seqs-final.qza \
+  --i-taxonomy /home/kspeer/array1/BrazilBatFlyMicrobiomeAnalysis/training-feature-classifiers/taxonomy_unfiltered.qza \
+  --p-exclude Actinomyces,Corynebacterium,Arthrobacter,Rothia,Propionibacterium,Atopobium,Sediminibacterium,Porphyromonas,Prevotella,Chryseobacterium,Capnocytophaga,Chryseobacterium,Flavobacterium,Pedobacter,UnclassifiedTM7,Bacillus,Geobacillus,Brevibacillus,Paenibacillus,Staphylococcus,Abiotrophia,Granulicatella,Enterococcus,Lactobacillus,Streptococcus,Clostridium,Coprococcus,Anaerococcus,Dialister,Megasphaera,Veillonella,Fusobacterium,Leptotrichia,Brevundimonas,Afipia,Bradyrhizobium,Devosia,Methylobacterium,Mesorhizobium,Phyllobacterium,Rhizobium,Methylobacterium,Phyllobacterium,Roseomonas,Novosphingobium,Sphingobium,Sphingomonas,Achromobacter,Burkholderia,Acidovorax,Comamonas,Curvibacter,Pelomonas,Cupriavidus,Duganella,Herbaspirillum,Janthinobacterium,Massilia,Oxalobacter,Ralstonia,Leptothrix,kingella,Neisseria,Escherichia,Haemophilus,Acinetobacter,Enhydrobacter,Pseudomonas,Stenotrophomonas,Xanthomonas \
+  --o-filtered-sequences rep-seqs-final_filtered.qza
+
+#Now remove those found in the negative control that aren't likely due to index bleed
+qiime taxa filter-seqs \
+  --i-sequences rep-seqs-final_filtered.qza \
+  --i-taxonomy /home/kspeer/array1/BrazilBatFlyMicrobiomeAnalysis/training-feature-classifiers/taxonomy_unfiltered.qza \
+  --p-exclude Cyanobacteria,Micrococcaceae,Solibacterales,Mycobacterium,Streptophyta,Alicyclobacillus,Bacillaceae,Kurthia,Salinicoccus,Peptoniphilus,Phenylobacterium,Methylobacteriaceae,Phyllobacteriaceae,Paracoccus,Skermanella,Sphingomonas,Burkholderiales,Hydrogenophilus,Klebsiella,Psychrobacter,Pseudomonas,Meiothermus,Thermus\
+  --o-filtered-sequences rep-seqs-final_filtered.qza
+
+#Some of the contaminant taxa must be eliminated using --p-mode exact, where you give the taxa plugin the exact taxon id. 
+#Use this in cases where you only want to eliminate specific sequences that have overlapping taxon IDs
+#with other non-contaminant groups. To get the exact taxon ID use the tabulated taxonomy_unfiltered.qzv:
+qiime taxa filter-seqs \
+  --i-sequences rep-seqs-final_filtered.qza \
+  --i-taxonomy training-feature-classifiers/taxonomy_unfiltered.qza \
+  --p-mode exact \
+  --p-exclude "k__Bacteria; p__Proteobacteria; c__Alphaproteobacteria; o__Rhizobiales; f__Brucellaceae; g__Ochrobactrum; s__","k__Bacteria; p__Bacteroidetes" \
+  --o-filtered-sequences rep-seqs-final_filtered_exact.qza
+
+#Make sure all mitochondria and chloroplasts and Archaea are removed from dataset and remove anything that isn't ID'd to phylum.
+qiime taxa filter-seqs \
+  --i-sequences rep-seqs-final_filtered_exact.qza \
+  --i-taxonomy /home/kspeer/array1/BrazilBatFlyMicrobiomeAnalysis/training-feature-classifiers/taxonomy_unfiltered.qza \
+  --p-include p__ \
+  --p-exclude mitochondria,chloroplast,Archaea \
+  --o-filtered-sequences rep-seqs-final_filtered_exact_mtclar.qza
+
+#Filter the contaminant taxa out of feature table using the --p-exclude commands as in the rep-seqs filtering above:
+qiime taxa filter-table \
+  --i-table table-final.qza \
+  --i-taxonomy /home/kspeer/array1/BrazilBatFlyMicrobiomeAnalysis/training-feature-classifiers/taxonomy_unfiltered.qza \
+  --p-exclude Actinomyces,Corynebacterium,Arthrobacter,Rothia,Propionibacterium,Atopobium,Sediminibacterium,Porphyromonas,Prevotella,Chryseobacterium,Capnocytophaga,Chryseobacterium,Flavobacterium,Pedobacter,UnclassifiedTM7,Bacillus,Geobacillus,Brevibacillus,Paenibacillus,Staphylococcus,Abiotrophia,Granulicatella,Enterococcus,Lactobacillus,Streptococcus,Clostridium,Coprococcus,Anaerococcus,Dialister,Megasphaera,Veillonella,Fusobacterium,Leptotrichia,Brevundimonas,Afipia,Bradyrhizobium,Devosia,Methylobacterium,Mesorhizobium,Phyllobacterium,Rhizobium,Methylobacterium,Phyllobacterium,Roseomonas,Novosphingobium,Sphingobium,Sphingomonas,Achromobacter,Burkholderia,Acidovorax,Comamonas,Curvibacter,Pelomonas,Cupriavidus,Duganella,Herbaspirillum,Janthinobacterium,Massilia,Oxalobacter,Ralstonia,Leptothrix,kingella,Neisseria,Escherichia,Haemophilus,Acinetobacter,Enhydrobacter,Pseudomonas,Stenotrophomonas,Xanthomonas \
+  --o-filtered-table table-final_filtered.qza
+
+#qiime taxa filter-table \
+  --i-table table-final_filtered.qza \
+  --i-taxonomy /home/kspeer/array1/BrazilBatFlyMicrobiomeAnalysis/training-feature-classifiers/taxonomy_unfiltered.qza \
+  --p-exclude Cyanobacteria,Micrococcaceae,Solibacterales,Mycobacterium,Streptophyta,Alicyclobacillus,Bacillaceae,Kurthia,Salinicoccus,Peptoniphilus,Phenylobacterium,Methylobacteriaceae,Phyllobacteriaceae,Paracoccus,Skermanella,Sphingomonas,Burkholderiales,Hydrogenophilus,Klebsiella,Psychrobacter,Pseudomonas,Meiothermus,Thermus\
+  --o-filtered-table table-final_filtered.qza
+
+#qiime taxa filter-table \
+  --i-table table-final_filtered.qza \
+  --i-taxonomy /home/kspeer/array1/BrazilBatFlyMicrobiomeAnalysis/training-feature-classifiers/taxonomy_unfiltered.qza \
+  --p-mode exact \
+  --p-exclude "k__Bacteria; p__Proteobacteria; c__Alphaproteobacteria; o__Rhizobiales; f__Brucellaceae; g__Ochrobactrum; s__","k__Bacteria; p__Bacteroidetes" \
+  --o-filtered-table table-final_filtered_exact.qza
+
+#qiime taxa filter-table \
+  --i-table table-final_filtered_exact.qza \
+  --i-taxonomy /home/kspeer/array1/BrazilBatFlyMicrobiomeAnalysis/training-feature-classifiers/taxonomy_unfiltered.qza \
+  --p-include p__ \
+  --p-exclude mitochondria,chloroplast,Archaea \
+  --o-filtered-table table-final_filtered_exact_mtclar.qza
+
+#In order to verify that all of the contaminant taxa are removed re-make the taxa bar plots and rep-seqs table.
+#It is not necessary to reclassify the taxonomy, because any features that are missing from rep-seqs and the feature
+#table will be ignored by the unfiltered taxonomy metadata.
+
+qiime taxa barplot \
+  --i-table table-final_filtered_exact_mtclar.qza \
+  --i-taxonomy /home/kspeer/array1/BrazilBatFlyMicrobiomeAnalysis/training-feature-classifiers/taxonomy_unfiltered.qza \
+  --m-metadata-file BrazilBatFlyMicrobMetadata.tsv \
+  --o-visualization taxa-bar-plots_filtered.qzv
+
+qiime feature-table tabulate-seqs \
+  --i-data rep-seqs-final_filtered_exact_mtclar.qza \
+  --o-visualization filtered_rep-seqs.qzv
+
+#Secure copy these to local computer for viewing in QIIME2View
+
+#Now, remove PCR(-) and Extraction(-) from feature table and remove samples that are not 
+#dominated by one of the primary symbionts of bat flies. In this case 528-1,955,506-4,1080-1
+qiime feature-table filter-samples \
+  --i-table table-final_filtered_exact_mtclar.qza \
+  --m-metadata-file BrazilBatFlyMicrobMetadata_filtered.tsv \
+  --o-filtered-table filtered_table.qza
+
+#Summarize the feature table to build a bar plot for view in QIIME2 Viewer
+qiime taxa barplot \
+  --i-table filtered_table.qza \
+  --i-taxonomy /home/kspeer/array1/BrazilBatFlyMicrobiomeAnalysis/training-feature-classifiers/taxonomy_unfiltered.qza \
+  --m-metadata-file BrazilBatFlyMicrobMetadata_filtered.tsv \
+  --o-visualization taxa-bar-plots_filtered_NoControls.qzv
+
+#Summarize the filtered feature tables as number of sequences to explore the results of the filtering steps:
+qiime feature-table summarize \
+  --i-table filtered_table.qza \
+  --o-visualization table-final_filtered.qzv \
+  --m-sample-metadata-file BrazilBatFlyMicrobMetadata_filtered.tsv
+
+#Secure copy these to local computer for viewing in QIIME2View
+
+####BUILD A PHYLOGENY####
+#Very quick to run
+#Create an alignment of using mafft:
+qiime alignment mafft \
+  --i-sequences rep-seqs-final_filtered_exact_mtclar.qza \
+  --o-alignment aligned-rep-seqs.qza
+
+#Mask the highly variable positions of the alignment, which are not informative for phylogenetic tree reconstruction:
+qiime alignment mask \
+  --i-alignment aligned-rep-seqs.qza \
+  --o-masked-alignment masked-aligned-rep-seqs.qza
+
+#Use FastTree to generate a phylogenetic tree from the masked alignment:
+qiime phylogeny fasttree \
+  --i-alignment masked-aligned-rep-seqs.qza \
+  --o-tree unrooted-tree.qza
+
+#Midpoint root the phylogeny
+qiime phylogeny midpoint-root \
+  --i-tree unrooted-tree.qza \
+  --o-rooted-tree rooted-tree.qza
+
+####NORMALIZE DATA USING philr####
+#Use the export function in QIIME2 to export the feature-table as a BIOM v2.1.0 formatted file
+#Followed the directions here: https://github.com/joey711/phyloseq/issues/821
+qiime tools export \
+  filtered_table.qza \
+  --output-dir exported-feature-table
+
+#Convert the exported feature table to a tsv file
+biom convert -i feature-table.biom -o feature-table.txt --to-tsv
+
+#Open the tsv version of the biom file in nano and change the column header "#OTU ID" to "OTUID"
+
+#Export the taxonomy file
+qiime tools export \
+  /home/kspeer/array1/BrazilBatFlyMicrobiomeAnalysis/training-feature-classifiers/taxonomy_unfiltered.qza \
+  --output-dir exported-feature-table
+
+#Open taxonomy.tsv and change "Feature ID" to "OTUID" to match the label in feature-table.tsv
+
+#Export the representative sequences
+qiime tools export \
+  rep-seqs-final_filtered_exact_mtclar.qza \
+  --output-dir exported-feature-table
+
+#Export the unrooted phylogeny
+qiime tools export \
+  unrooted-tree.qza \
+  --output-dir exported-tree-unrooted
+
+#Export the rooted phylogeny
+qiime tools export \
+  rooted-tree.qza \
+  --output-dir exported-tree-rooted
+
+#deactivate QIIME2
+source deactivate
+
+#Download the exported files to the local computer using secure copy
+
+#All further analyses conducted in R Studio. See R code included in Github repository
+#for further processing.
