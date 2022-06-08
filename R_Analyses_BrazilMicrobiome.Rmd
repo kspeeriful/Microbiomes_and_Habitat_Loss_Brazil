@@ -1,0 +1,2226 @@
+---
+title: "R_Analyses_BrazilMicrobiome"
+author: "Kelly A. Speer"
+date: "12/7/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+After processing raw reads using the commands in QIIME2Processing_BrazilMicrobiome.txt, the below code was used to format QIIME2 exported files for import into phyloseq, analyze the data, and create the figures. This code is split into two sections: Formatting and Filtering, Data Analysis
+
+# Formatting and Filtering of QIIME2-Processed Data
+
+The QIIME2 biom file does not have the necessary taxonomy information associated with it.
+I edited the instructions in the pdf posted to this GitHub query (https://github.com/joey711/phyloseq/issues/821)
+to format the taxonomy file correctly. The feature table file is used here to eliminate some rows from the taxonomy file.
+
+Load necessary libraries
+```{r}
+library(tidyverse)
+```
+
+Read in the .txt version of the feature table (make sure column header is "OTUID", not "#OTUID")
+```{r}
+features <- read.table(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/QIIME2exports/exported-feature-table/feature-table.txt"), header=TRUE)
+head(features)
+```
+
+Read in the .tsv version of the taxonomy table (make sure column header is "OTUID", not "Feature ID")
+```{r}
+tax <- read.table(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/QIIME2exports/exported-feature-table/taxonomy.tsv"), sep='\t', header=TRUE)
+head(tax)
+```
+
+Create a list of OTUIDs that are present in tax, but not in features, which need to be eliminated and remove them
+The remaining table should have the same number of rows as in the features data frame
+```{r}
+tax_filtered <- tax[tax$OTUID %in% features$OTUID,]
+```
+
+Separate the "Taxon" column in the tax_filtered data frame by semicolon so that each step of the taxonomy (e.g., kingdom, phylum, class, etc.) is its own column
+```{r}
+tax_filtered_sep <- separate(tax_filtered, Taxon, c("Kingdom","Phylum","Class","Order", "Family", "Genus","Species"), sep= ";", remove=TRUE)
+```
+
+Remove the prefixes from the taxonomic information
+```{r}
+tax_filtered_sep$Kingdom <- sub("k__", "", tax_filtered_sep$Kingdom)
+tax_filtered_sep$Phylum <- sub("p__", "", tax_filtered_sep$Phylum)
+tax_filtered_sep$Class <- sub("c__", "", tax_filtered_sep$Class)
+tax_filtered_sep$Order <- sub("o__", "", tax_filtered_sep$Order)
+tax_filtered_sep$Family <- sub("f__", "", tax_filtered_sep$Family)
+tax_filtered_sep$Genus <- sub("g__", "", tax_filtered_sep$Genus)
+tax_filtered_sep$Species <- sub("s__", "", tax_filtered_sep$Species)
+```
+
+Remove "Confidence" column
+```{r}
+tax_filtered_sep$Confidence<-NULL
+```
+
+This creates a file containing the OTUID and taxonomic info that will later be used to make the phyloseq objects.
+
+In text editor, replace all of the blanks with NA and the extra spaces before taxonomy information with nothing
+
+Re-format the sample name in the feature data frame to remove the X at the beginning of each sample name and replace . with an _
+Also note that sample names for 79501 and 38801 are formatted differently than the rest. These sample names match the R1 and R2 .fastq files containing raw reads for these samples.
+```{r}
+colnames(features)<- sub("X", "Sample", colnames(features))
+colnames(features)<- sub(".", "_", colnames(features), fixed=TRUE)
+colnames(features)<- sub("79501", "795_1", colnames(features), fixed=TRUE)
+colnames(features)<- sub("38801", "388_1", colnames(features), fixed=TRUE)
+```
+
+This creates the reformatted feature table that will be used to make the phyloseq object
+
+## Format the metadata to include landscape variables
+
+Load necessary libraries
+```{r libraries, message=FALSE}
+library(factoextra)
+```
+
+Read in the metadata
+```{r read metadata}
+metadata <- read.table(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/Metadata_filtered.tsv"), sep='\t', row.names = 1, header =TRUE)
+```
+
+Format the Metadata sample IDs to match the sample IDs in the features matrix
+```{r}
+row.names(metadata) <- sub("38801", "388-1", row.names(metadata))
+row.names(metadata) <- sub("79501", "795-1", row.names(metadata))
+
+row.names(metadata) <- sub("-", "_", row.names(metadata))
+row.names(metadata) <- sub("^", "Sample", row.names(metadata))
+
+metadata$SampleID <- row.names(metadata)
+head(metadata)
+```
+
+Read landscape variables, which were estimated using ArcGIS
+```{r read landscape var}
+landscape <- read.csv(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/LandscapeVariables.csv"), header=T)
+```
+
+Cluser the continuous variables Area and Isolation using K-means clustering
+https://www.datacamp.com/community/tutorials/k-means-clustering-r
+https://www.r-bloggers.com/k-means-clustering-in-r/
+https://uc-r.github.io/kmeans_clustering#optimal
+
+We want to determine the optimal number of clusters for our dataset
+using the silhouette method (how well does each object lie within its cluster)
+
+Silhouette method for Area and Log2 Area
+```{r clustering Area}
+set.seed(123)
+fviz_nbclust(as.data.frame(landscape$Area), kmeans, method = "silhouette") #2 clusters
+fviz_nbclust(as.data.frame(log2(landscape$Area)), kmeans, method = "silhouette") #2 clusters
+```
+
+Silhouette for Isolation and Log2 Isolation
+```{r clustering Isolation}
+set.seed(123)
+fviz_nbclust(as.data.frame(landscape$Isolation), kmeans, method = "silhouette") #2 clusters
+fviz_nbclust(as.data.frame(log2(landscape$Isolation)), kmeans, method = "silhouette") #3 clusters
+```
+
+Cluster Area and Isolation based on the optimum number of clusters indicated above
+```{r}
+set.seed(123)
+AreaCluster<- kmeans(landscape$Area, 2, nstart =25)
+Area_Log2_Cluster<- kmeans(log2(landscape$Area), 2, nstart =25)
+IsolationCluster<- kmeans(landscape$Isolation, 2, nstart =25)
+Isolation_Log2_Cluster<- kmeans(log2(landscape$Isolation), 3, nstart =25)
+```
+
+Add the cluster assignments as columns to the landscape variables
+```{r}
+landscape$AreaCluster<-as.factor(AreaCluster$cluster)
+landscape$Area_Log2_Cluster<-as.factor(Area_Log2_Cluster$cluster)
+landscape$IsolationCluster<-as.factor(IsolationCluster$cluster)
+landscape$Isolation_Log2_Cluster<-as.factor(Isolation_Log2_Cluster$cluster)
+head(landscape)
+```
+
+Area clusters break into REGUA ("protected") and non-REGUA ("fragmented") forest
+No clear pattern with isolation clusters
+
+Merge the landscape variables with the metadata file
+```{r merge metadata and landscape var}
+metadata_complete <- merge(metadata, landscape, by.x='Fragment', all.x=T)
+row.names(metadata_complete)<- metadata_complete$SampleID
+metadata_complete$SampleID<-NULL
+```
+
+Add columns of Log2 scaled Area, Isolation, and Distance From Source
+```{r scale landscape var}
+metadata_complete$Area_Scaled_2<- as.numeric(log2(metadata_complete$Area))
+metadata_complete$Isolation_Scaled_2<- as.numeric(log2(metadata_complete$Isolation))
+metadata_complete$DistanceFromSource[metadata_complete$DistanceFromSource == 0]<-NA
+metadata_complete$DtS_Scaled_2<- as.numeric(log2(metadata_complete$DistanceFromSource))
+head(metadata_complete)
+```
+
+Area clusters break into "protected" (i.e., REGUA) and "fragmented" (i.e., non-REGUA) forest. Add this info to metadata.
+
+```{r Add habitat type}
+metadata_complete$HabitatType[metadata_complete$Fragment %in% c("REGUA","REGUA2","REGUA3")]<-"Protected"
+metadata_complete$HabitatType[is.na(metadata_complete$HabitatType)]<-"Fragmented"
+
+```
+
+This creates the reformatted metadata for making the phyloseq objects
+
+## Import Data into Phyloseq
+
+Load necessary libraries
+```{r load libraries, message=FALSE, warning=FALSE}
+library(phyloseq)
+```
+
+Read features
+```{r read features}
+features <- read.csv(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/phyloseq_files/features_phyloseq.csv"), sep=',', row.names=1, header=TRUE)
+features <- as.matrix(features)
+```
+
+Read taxonomy
+```{r read taxonomy}
+tax <- read.csv(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/phyloseq_files/taxonomy_phyloseq.csv"), sep=',', row.names=1, header=TRUE)
+tax <- as.matrix(tax)
+```
+
+Read metadata
+```{r read metadata}
+metadata_complete<- read.csv(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/phyloseq_files/metadata_phyloseq.csv"), sep=',', row.names=1, header=TRUE)
+```
+
+Read rooted tree
+```{r}
+phy_tree <- read_tree(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/QIIME2exports/exported-tree-rooted/tree.nwk"))
+```
+
+Import as phyloseq objects
+
+```{r}
+OTU <- otu_table(features, taxa_are_rows=TRUE)
+TAX <- tax_table(tax)
+META <- sample_data(metadata_complete)
+```
+
+Are OTU names consistent across objects?
+
+```{r}
+head(taxa_names(OTU))
+head(taxa_names(TAX))
+head(taxa_names(phy_tree))
+```
+
+Do files have the same sample names?
+```{r}
+setdiff(sample_names(META), sample_names(OTU))
+```
+
+Merge into one phyloseq object
+```{r create BrazilMicrob.unfiltered}
+BrazilMicrob.unfiltered <- phyloseq(OTU, TAX, META, phy_tree)
+BrazilMicrob.unfiltered
+```
+
+## Filter phyloseq data using decontam
+https://benjjneb.github.io/decontam/vignettes/decontam_intro.html
+
+Load necesary libraries
+```{r load libraries, message=FALSE, warning=FALSE}
+library(decontam)
+library(ape)
+```
+
+Estimate which ASVs might be contaminants based on their occurence across samples with different concentrations
+Contaminant frequency is expected to be inversely proportional to input DNA concentration.
+```{r contaminant estimation}
+contamdf.freq <- isContaminant(BrazilMicrob.unfiltered, method="frequency", conc="AvLibraryConc")
+```
+
+Summarize how many contaminant features there are in the data set and their rank in abundance in the overall dataset
+
+```{r}
+table(contamdf.freq$contaminant)
+(which(contamdf.freq$contaminant))
+```
+
+Plot these potentially contaminant features to see if frequency is negatively correlated with DNA concentration.
+
+```{r decontam plots}
+set.seed(100)
+plot_frequency(BrazilMicrob.unfiltered, taxa_names(BrazilMicrob.unfiltered)[sample(which(contamdf.freq$contaminant),9)], conc="AvLibraryConc") + xlab("DNA Concentration (Qubit)")
+```
+
+Remove potentially contaminant features
+
+```{r create BrazilMicrob}
+BrazilMicrob<- prune_taxa(!contamdf.freq$contaminant, BrazilMicrob.unfiltered)
+BrazilMicrob
+```
+
+##Remove Low Abundance and Low Variation ASVs
+Remove ASVs identified by fewer than 0.001 and 0.0001 of the total reads in a sample.
+Based on recommendation to use relative copy numbers from Alberdi et al. 2017
+We will do this by first removing any samples with fewer than 2,500 total reads
+
+Remove samples that fall below a minimum sequencing depth of 2500
+```{r create BM}
+BM<-prune_samples(sample_sums(BrazilMicrob)>=2500, BrazilMicrob)
+BM #no samples lost
+```
+
+Take the otu_table from the phyloseq object filtered to min read depth
+```{r}
+BM.otu_filtered<- as.matrix(otu_table(BM))
+BM.otu_filtered.strict <- as.matrix(otu_table(BM))
+```
+
+If an ASV has fewer than 0.0001 or 0.001 of 2,500 reads replace the read copy number with 0, making it so that ASV is no longer detected in that sample
+
+```{r}
+BM.otu_filtered[BM.otu_filtered < 0.0001*colSums(BM.otu_filtered)]<-0
+BM.otu_filtered.strict[BM.otu_filtered.strict < 0.001*colSums(BM.otu_filtered.strict)]<-0
+```
+
+Recreate the phyloseq object using the new filtered otu_table
+
+```{r create BM and BM.strict}
+BM<-phyloseq(otu_table(BM.otu_filtered), TAX, META, phy_tree)
+BM.strict <- phyloseq(otu_table(BM.otu_filtered.strict), TAX, META, phy_tree)
+```
+
+Remove ASVs in the new phyloseq object that are not present in any samples
+
+```{r}
+BM<-prune_taxa(taxa_sums(BM)>0, BM)
+BM.strict<-prune_taxa(taxa_sums(BM.strict)>0,BM.strict)
+BM #38 ASVs lost
+BM.strict #667 ASVs lost
+```
+
+The filtered otu_table, tax_table, and phylogeny are saved on github in the phyloseq_files directory.
+
+Split out the REGUA-Area patches
+
+```{r BM.REGArea, warning=FALSE, message=FALSE}
+BM.REGArea <- subset_samples(BM, Fragment!="LI6" & Fragment!="LI8" & Fragment!="MI6")
+BM.REGArea <- prune_taxa(taxa_sums(BM.REGArea)>0, BM.REGArea)
+BM.REGArea
+```
+
+# Data Analysis
+
+## Rarefaction Curves by Pool Type
+Plots to check that sequencing depth was sufficinet in both Low Concentration and High Concentration libraries
+
+Load necessary libraries
+
+```{r load lib, message=FALSE, warning=FALSE}
+library(vegan)
+library(ggplot2)
+```
+
+Used the ggrare function from the below Github repository to build rarefaction curve colored by sample type:
+https://github.com/mahendra-mariadassou/phyloseq-extended/blob/master/R/graphical_methods.R
+
+```{r ggrare}
+#Rarefaction curve, ggplot style
+ggrare <- function(physeq, step = 10, label = NULL, color = NULL, plot = TRUE, parallel = FALSE, se = TRUE) {
+  ## Args:
+  ## - physeq: phyloseq class object, from which abundance data are extracted
+  ## - step: Step size for sample size in rarefaction curves
+  ## - label: Default `NULL`. Character string. The name of the variable
+  ##          to map to text labels on the plot. Similar to color option
+  ##          but for plotting text.
+  ## - color: (Optional). Default ‘NULL’. Character string. The name of the
+  ##          variable to map to colors in the plot. This can be a sample
+  ##          variable (among the set returned by
+  ##          ‘sample_variables(physeq)’ ) or taxonomic rank (among the set
+  ##          returned by ‘rank_names(physeq)’).
+  ##
+  ##          Finally, The color scheme is chosen automatically by
+  ##          ‘link{ggplot}’, but it can be modified afterward with an
+  ##          additional layer using ‘scale_color_manual’.
+  ## - color: Default `NULL`. Character string. The name of the variable
+  ##          to map to text labels on the plot. Similar to color option
+  ##          but for plotting text.
+  ## - plot:  Logical, should the graphic be plotted.
+  ## - parallel: should rarefaction be parallelized (using parallel framework)
+  ## - se:    Default TRUE. Logical. Should standard errors be computed.
+  ## require vegan
+  x <- as(otu_table(physeq), "matrix")
+  if (taxa_are_rows(physeq)) { x <- t(x) }
+  
+  ## This script is adapted from vegan `rarecurve` function
+  tot <- rowSums(x)
+  S <- rowSums(x > 0)
+  nr <- nrow(x)
+  
+  rarefun <- function(i) {
+    cat(paste("rarefying sample", rownames(x)[i]), sep = "\n")
+    n <- seq(1, tot[i], by = step)
+    if (n[length(n)] != tot[i]) {
+      n <- c(n, tot[i])
+    }
+    y <- rarefy(x[i, ,drop = FALSE], n, se = se)
+    if (nrow(y) != 1) {
+      rownames(y) <- c(".S", ".se")
+      return(data.frame(t(y), Size = n, Sample = rownames(x)[i]))
+    } else {
+      return(data.frame(.S = y[1, ], Size = n, Sample = rownames(x)[i]))
+    }
+  }
+  if (parallel) {
+    out <- mclapply(seq_len(nr), rarefun, mc.preschedule = FALSE)
+  } else {
+    out <- lapply(seq_len(nr), rarefun)
+  }
+  df <- do.call(rbind, out)
+  
+  ## Get sample data
+  if (!is.null(sample_data(physeq, FALSE))) {
+    sdf <- as(sample_data(physeq), "data.frame")
+    sdf$Sample <- rownames(sdf)
+    data <- merge(df, sdf, by = "Sample")
+    labels <- data.frame(x = tot, y = S, Sample = rownames(x))
+    labels <- merge(labels, sdf, by = "Sample")
+  }
+  
+  ## Add, any custom-supplied plot-mapped variables
+  if( length(color) > 1 ){
+    data$color <- color
+    names(data)[names(data)=="color"] <- deparse(substitute(color))
+    color <- deparse(substitute(color))
+  }
+  if( length(label) > 1 ){
+    labels$label <- label
+    names(labels)[names(labels)=="label"] <- deparse(substitute(label))
+    label <- deparse(substitute(label))
+  }
+  
+  p <- ggplot(data = data, aes_string(x = "Size", y = ".S", group = "Sample", color = color))
+  p <- p + labs(x = "Sample Size", y = "Species Richness")
+  if (!is.null(label)) {
+    p <- p + geom_text(data = labels, aes_string(x = "x", y = "y", label = label, color = color),
+                       size = 3, hjust=0, nudge_x=500)
+  }
+  p <- p + geom_line()
+  if (se) { ## add standard error if available
+    p <- p + geom_ribbon(aes_string(ymin = ".S - .se", ymax = ".S + .se", color = NULL, fill = color), alpha = 0.2)
+  }
+  if (plot) {
+    plot(p)
+  }
+  invisible(p)
+}
+```
+
+Order the Parasite Species so that they are grouped by family
+
+```{r}
+sample_data(BM)$ParasiteSpecies<- factor(sample_data(BM)$ParasiteSpecies, levels=c("Basilia andersoni", 
+                                                                                     "Basilia ferruginea", 
+                                                                                     "Basilia juquiensis", 
+                                                                                     "Basilia lindolphoi",
+                                                                                     "Aspidoptera falcata", 
+                                                                                     "Megistopoda proxima", 
+                                                                                     "Metelasmus pseudopterus",
+                                                                                     "Paraeuctenodes similis",
+                                                                                     "Paratrichobius longicrus", 
+                                                                                     "Speiseria ambigua",
+                                                                                     "Strebla guajiro", 
+                                                                                     "Strebla mirabilis", 
+                                                                                     "Strebla wiedemanni",
+                                                                                     "Trichobius dugesioides",
+                                                                                     "Trichobius furmani", 
+                                                                                     "Trichobius joblingi"))
+
+sample_data(BM.strict)$ParasiteSpecies<- factor(sample_data(BM.strict)$ParasiteSpecies, levels=c("Basilia andersoni", 
+                                                                                         "Basilia ferruginea", 
+                                                                                         "Basilia juquiensis",
+                                                                                         "Basilia lindolphoi",
+                                                                                           "Aspidoptera falcata",
+                                                                                         "Megistopoda proxima",
+                                                                                         "Metelasmus pseudopterus",
+                                                                                           "Paraeuctenodes similis",
+                                                                                         "Paratrichobius longicrus",
+                                                                                         "Speiseria ambigua",
+                                                                                           "Strebla guajiro", 
+                                                                                         "Strebla mirabilis", 
+                                                                                         "Strebla wiedemanni",
+                                                                                           "Trichobius dugesioides",
+                                                                                         "Trichobius furmani", 
+                                                                                         "Trichobius joblingi"))
+```
+
+Now use the function ggrare to plot the rarefaction curves with Parasite Species as facets
+Plot the BM curve for all samples to show that Low Concentration (LC) samples did not detect different number of ASVs than High Concentration Pools (HC)
+Supplementary Figure 2
+
+```{r Sup Fig2, message=FALSE}
+p <- ggrare(BM, step=100, color="Pool", se=TRUE)
+p + facet_wrap(~ParasiteSpecies) 
+```
+
+Now the BM.strict samples
+Supplementary Figure 3
+
+```{r Sup Fig3, message=FALSE}
+p <- ggrare(BM, step=100, color="Pool", se=TRUE)
+p + facet_wrap(~ParasiteSpecies) 
+```
+
+##Barplots of Relative Abundances
+https://joey711.github.io/phyloseq/plot_bar-examples.html
+https://github.com/joey711/phyloseq/issues/901
+
+Bar plots of each Parasite Species to visualize microbiome composition within species
+
+Group samples in phyloseq object by Parasite Species 
+
+```{r glom by parasite, message=FALSE, warning=FALSE}
+glom_by_Parasite <- merge_samples(BM, "ParasiteSpecies")
+glom_by_Parasite.st <- merge_samples(BM.strict, "ParasiteSpecies")
+```
+
+Group REGUA-Area samples in phyloseq object by Sampling Site
+```{r glob by fragment, message=FALSE, warning=FALSE}
+glom_by_Fragment <- merge_samples(BM.REGArea, "Fragment")
+```
+
+Transform sample counts to relative abundance and convert phyloseq objects into dataframes
+```{r, warning=FALSE, message=FALSE}
+glom_by_Parasite <- transform_sample_counts(glom_by_Parasite, function(x) x/sum(x))
+glom_by_Parasite.st <- transform_sample_counts(glom_by_Parasite.st, function(x) x/sum(x))
+glom_by_Fragment <- transform_sample_counts(glom_by_Fragment, function(x) x/sum(x))
+
+glom_by_Parasite.df<- psmelt(glom_by_Parasite)
+glom_by_Parasite.st.df<- psmelt(glom_by_Parasite.st)
+glom_by_Fragment.df<- psmelt(glom_by_Fragment)
+```
+
+Format the metadata files
+```{r format metadata}
+#Convert taxonomic ranking to character
+glom_by_Parasite.df$Genus <- as.character(glom_by_Parasite.df$Genus)
+glom_by_Parasite.st.df$Genus <- as.character(glom_by_Parasite.st.df$Genus)
+glom_by_Fragment.df$Genus <- as.character(glom_by_Fragment.df$Genus)
+
+#Aggegate all taxa with <1% abundance into an "Other" category
+glom_by_Parasite.df$Genus[glom_by_Parasite.df$Abundance<0.01] <- " Low Abundance (<1%)"
+glom_by_Parasite.st.df$Genus[glom_by_Parasite.st.df$Abundance<0.01] <- " Low Abundance (<1%)"
+glom_by_Fragment.df$Genus[glom_by_Fragment.df$Abundance<0.01] <- " Low Abundance (<1%)"
+
+#Change NAs and blanks to "Unknown", must do this while these columns are characters, not factors
+glom_by_Parasite.df$Genus[is.na(glom_by_Parasite.df$Genus) | glom_by_Parasite.df$Genus == " "] <-" Unknown"
+glom_by_Parasite.st.df$Genus[is.na(glom_by_Parasite.st.df$Genus) | glom_by_Parasite.st.df$Genus == " "] <-" Unknown"
+glom_by_Fragment.df$Genus[is.na(glom_by_Fragment.df$Genus) | glom_by_Fragment.df$Genus == " "] <-" Unknown"
+
+#Change order of Genus according to abundance
+glom_by_Parasite.df$Genus<- factor(glom_by_Parasite.df$Genus, 
+                                   levels= as.list(unique(glom_by_Parasite.df$Genus)))
+glom_by_Parasite.st.df$Genus<- factor(glom_by_Parasite.st.df$Genus, 
+                                     levels= as.list(unique(glom_by_Parasite.st.df$Genus)))
+glom_by_Fragment.df$Genus<- factor(glom_by_Fragment.df$Genus, 
+                                   levels= as.list(unique(glom_by_Fragment.df$Genus)))
+
+```
+
+Plot the average composition of the microbiome by parasite species (Figures 2A, S4)
+```{r plot relative abundance by parasite species}
+p_Genus<- ggplot(data=glom_by_Parasite.df, aes(x=Sample, y=Abundance, fill=Genus))
+p_Genus + geom_bar(stat="identity", position="fill") + 
+  scale_fill_viridis_d(direction=-1) + 
+  theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+  scale_x_discrete(limits=c("Basilia andersoni","Basilia ferruginea",
+                            "Basilia juquiensis","Basilia lindolphoi",
+                            "Aspidoptera falcata","Megistopoda proxima",
+                            "Metelasmus pseudopterus","Paraeuctenodes similis",
+                            "Paratrichobius longicrus","Speiseria ambigua",
+                            "Strebla guajiro","Strebla mirabilis","Strebla wiedemanni",
+                            "Trichobius dugesioides","Trichobius furmani","Trichobius joblingi"))
+
+p_Genus.st<- ggplot(data=glom_by_Parasite.st.df, aes(x=Sample, y=Abundance, fill=Genus))
+p_Genus.st + geom_bar(stat="identity", position="fill") + 
+  scale_fill_viridis_d(direction=-1) + 
+  theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+  scale_x_discrete(limits=c("Basilia andersoni","Basilia ferruginea",
+                            "Basilia juquiensis","Basilia lindolphoi",
+                            "Aspidoptera falcata","Megistopoda proxima",
+                            "Metelasmus pseudopterus","Paraeuctenodes similis",
+                            "Paratrichobius longicrus","Speiseria ambigua",
+                            "Strebla guajiro","Strebla mirabilis","Strebla wiedemanni",
+                            "Trichobius dugesioides","Trichobius furmani","Trichobius joblingi"))
+```
+
+Plot the average composition of the microbiome by Fragment (Figure S5)
+
+```{r plot relative abundance by fragment}
+p_Fragment<- ggplot(data=glom_by_Fragment.df, aes(x=Sample, y=Abundance, fill=Genus))
+p_Fragment + geom_bar(stat="identity", position="fill") + 
+  scale_fill_viridis_d(direction=-1) + 
+  theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+  scale_x_discrete(limits=c("REGUA","REGUA2","REGUA3","T25","T12", 
+                            "T19","T21","T2","T13","T23",
+                            "T11","T10","T26"))
+```
+
+##Transform the data using philr
+
+Separate the well-sampled species from the BM dataset and combine them into a list. You want each species in a separate phyloseq object for transformation, because log-ratio transformations are relative to the other samples in the dataset. We only want to consider other members of the same species for these transformations. 
+
+```{r 4 Species datasets, message=FALSE, warning=FALSE}
+BM.Streblaguajiro<-subset_samples(BM.REGArea, ParasiteSpecies=="Strebla guajiro") #Present in 8 fragments
+BM.Speiseriaambigua<-subset_samples(BM.REGArea, ParasiteSpecies=="Speiseria ambigua") #Present in 10 fragments, all but REGUA
+BM.Paratrichobisulongicrus<-subset_samples(BM.REGArea, ParasiteSpecies=="Paratrichobius longicrus") #Present in 10 fragments
+BM.Trichobiusjoblingi<-subset_samples(BM.REGArea, ParasiteSpecies=="Trichobius joblingi") #present in all fragments
+
+#create a list of these 4 phyloseq objects
+BM.4spec.philr<-c(BM.Streblaguajiro,BM.Speiseriaambigua, BM.Paratrichobisulongicrus, BM.Trichobiusjoblingi)
+
+#assign names to the list
+names(BM.4spec.philr)<-c("BM.Streblaguajiro","BM.Speiseriaambigua", "BM.Paratrichobiuslongicrus", "BM.Trichobiusjoblingi")
+
+#Check that the subsetting worked
+lapply(1:length(BM.4spec.philr), function(x) sample_data(BM.4spec.philr[[x]])$ParasiteSpecies)
+
+#Remove taxa that are absent from each phyloseq object
+BM.4spec.philr<-lapply(BM.4spec.philr, function(x) filter_taxa(x, function(y) sum(y) > 0, TRUE))
+
+```
+
+Below commands and comments taken from: https://bioconductor.org/packages/3.7/bioc/vignettes/philr/inst/doc/philr-intro.html
+philr is an isometric log-ratio transformation that uses the rooted phylogeny to "balance" the read counts between sister ASVs. This approach takes into account the compositional nature of microbiome relative abundances calculated from sequence reads. Find the paper here for more info: https://elifesciences.org/articles/21887 (DOI 10.7554/eLife.21887)
+
+Load necessary libraries
+```{r load lib, message=FALSE, warning=FALSE}
+library(philr)
+library(ape)
+```
+
+First, add a pseudocount of 1 to avoid calculating log-ratios involving zeros
+```{r add pseudocount, message=FALSE, warning=FALSE}
+BM.philr <- transform_sample_counts(BM, function(x) x+1)
+BM.strict.philr <- transform_sample_counts(BM.strict, function(x) x+1)
+
+#Remove parasite species represented by fewer than 5 samples from the REGUA-area dataset prior to adding pseudocount
+BM.REGArea.philr<- subset_samples(BM.REGArea, !(ParasiteSpecies %in% c("Metelasmus pseudopterus","Paraeuctenodes similis","Strebla mirabilis","Trichobius furmani")))
+BM.REGArea.philr = filter_taxa(BM.REGArea.philr, function(x) sum(x) > 0, TRUE)
+BM.REGArea.philr <- transform_sample_counts(BM.REGArea, function(x) x+1)
+
+BM.4spec.philr <- lapply(BM.4spec.philr, function(x) transform_sample_counts(x, function(y) y+1))
+
+```
+
+Second: Process the Tree
+Check that the tree is rooted
+```{r}
+is.rooted(phy_tree(BM.philr))
+is.rooted(phy_tree(BM.strict.philr))
+is.rooted(phy_tree(BM.REGArea.philr))
+lapply(BM.4spec.philr, function(x) is.rooted(phy_tree(x)))
+```
+
+Check that there are not multichotomies
+```{r}
+is.binary(phy_tree(BM.philr))
+is.binary(phy_tree(BM.strict.philr))
+is.binary(phy_tree(BM.REGArea.philr))
+lapply(BM.4spec.philr, function(x) is.binary(phy_tree(x)))
+
+```
+
+All cases are false (except 4 species dataset), so use function multi2di from the ape package to replace multichotomies with a series dichotomies with one or several branches of zero length
+
+```{r, message=FALSE, warning=FALSE}
+phy_tree(BM.philr) <- multi2di(phy_tree(BM.philr))
+phy_tree(BM.strict.philr) <- multi2di(phy_tree(BM.strict.philr))
+phy_tree(BM.REGArea.philr) <- multi2di(phy_tree(BM.REGArea.philr))
+```
+
+Check that all the trees are now binary
+
+```{r}
+is.binary(phy_tree(BM.philr))
+is.binary(phy_tree(BM.strict.philr))
+is.binary(phy_tree(BM.REGArea.philr))
+
+```
+
+Name the internal nodes of the tree (n1, n2, n3...)
+
+```{r, message=FALSE, warning=FALSE, error=FALSE}
+phy_tree(BM.philr) <- makeNodeLabel(phy_tree(BM.philr), method="number", prefix='n')
+phy_tree(BM.strict.philr) <- makeNodeLabel(phy_tree(BM.strict.philr), method="number", prefix='n')
+phy_tree(BM.REGArea.philr) <- makeNodeLabel(phy_tree(BM.REGArea.philr), method="number", prefix='n')
+for (x in 1:length(BM.4spec.philr)) {
+  phy_tree(BM.4spec.philr[[x]]) <- makeNodeLabel(phy_tree(BM.4spec.philr[[x]]), method="number", prefix='n')
+}
+
+```
+
+Third: Investigate the Dataset Components
+Because philr uses the compositions package, taxa must be columns and samples must be rows
+We have to transpose our data to get it in this format, because it is exported from QIIME2 with the taxa as rows and samples as columns
+
+```{r, warning=FALSE, message=FALSE}
+#transpose the BM data and create tree file
+otu.table<- t(otu_table(BM.philr))
+tree <- phy_tree(BM.philr)
+
+#transpose the BM.strict data and create tree file
+otu.table.strict<- t(otu_table(BM.strict.philr))
+tree.strict <- phy_tree(BM.strict.philr)
+
+#transpose the BM.REGArea data and create tree file
+otu.table.REGArea<- t(otu_table(BM.REGArea.philr))
+tree.REGArea <- phy_tree(BM.REGArea.philr)
+
+#See Fourth step for 4 species dataset
+```
+
+Check that the samples are the rows and the taxa are the columns
+
+```{r}
+otu.table[1:2, 1:2]
+otu.table.strict[1:2, 1:2]
+otu.table.REGArea[1:2, 1:2]
+#See fourth step for 4 species dataset
+```
+
+Fourth: Transform the data using PhILR
+
+```{r philr transform, message=FALSE, warning=FALSE}
+bm.philr <- philr(otu.table, tree, part.weights='enorm.x.gm.counts', ilr.weights='blw.sqrt')
+bm.philr[1:5,1:5]
+
+bm.strict.philr <- philr(otu.table.strict, tree.strict, part.weights='enorm.x.gm.counts', ilr.weights='blw.sqrt')
+bm.strict.philr[1:5,1:5]
+
+bm.REGArea.philr <- philr(otu.table.REGArea, tree.REGArea, part.weights='enorm.x.gm.counts', ilr.weights='blw.sqrt')
+bm.REGArea.philr[1:5,1:5]
+
+#The below code transposes the data and then estimates philr balances within each of the 4 most well-sampled species
+bm.4spec.philr<-as.list(1:length(BM.4spec.philr))
+for (x in 1:length(BM.4spec.philr)) {
+  otu.table<-t(otu_table(BM.4spec.philr[[x]]))
+  tree<-phy_tree(BM.4spec.philr[[x]])
+  bm.4spec.philr[[x]]<-philr(otu.table, tree, part.weights='enorm.x.gm.counts', ilr.weights='blw.sqrt')
+}
+#assign names to the list of philr balance matrices
+names(bm.4spec.philr)<-names(BM.4spec.philr)
+
+lapply(bm.4spec.philr, function(x) x[1:5,1:5])
+```
+
+##PCoA on distance between philr balances
+Tutorial here: https://bioconductor.org/packages/3.7/bioc/vignettes/philr/inst/doc/philr-intro.html
+
+confirm balance matrices output from philr transformation are in matrix format in R
+```{r}
+bm.philr <- as.matrix(bm.philr)
+bm.strict.philr <- as.matrix(bm.strict.philr)
+bm.REGArea.philr <- as.matrix(bm.REGArea.philr)
+
+```
+
+create distance matrix using euclidean distance
+
+```{r distance matrix}
+bm.dist <- dist(bm.philr, method="euclidean")
+bm.strict.dist <- dist(bm.strict.philr, method="euclidean")
+bm.REGArea.dist <- dist(bm.REGArea.philr, method="euclidean")
+
+```
+
+Do PCoA on distance matrix
+```{r PCoA}
+bm.pcoa <- ordinate(BM.philr, 'PCoA', distance=bm.dist)
+bm.strict.pcoa <- ordinate(BM.strict.philr, 'PCoA', distance=bm.strict.dist)
+bm.REGArea.pcoa <- ordinate(BM.REGArea.philr, 'PCoA', distance=bm.REGArea.dist)
+
+```
+
+Repeat the above steps for the 4 most well-sampled species
+```{r 4 species dataset PCoA}
+bm.4spec.pcoa<-as.list(1:length(bm.4spec.philr))
+for(x in 1:length(bm.4spec.philr)) {
+  matx<-as.matrix(bm.4spec.philr[[x]])
+  distx<-dist(matx, method="euclidean")
+  bm.4spec.pcoa[[x]]<-ordinate(BM.4spec.philr[[x]], 'PCoA', distance=distx)
+}
+names(bm.4spec.pcoa)<-names(BM.4spec.philr)
+
+```
+
+##Plot PCoA
+
+Load necessary libraries
+```{r load lib, message=FALSE}
+library(ggplot2)
+library(viridis)
+
+```
+
+Organize bat fly species by Streblidae and Nycteribiidae and then alphabetical within genus for the BM and BM.strict datasets
+
+```{r Order Factors, warning=FALSE, message=FALSE}
+sample_data(BM.philr)$ParasiteSpecies<- factor(sample_data(BM.philr)$ParasiteSpecies,
+                                                levels=c("Basilia andersoni",
+                                                         "Basilia ferruginea",
+                                                         "Basilia juquiensis",
+                                                         "Basilia lindolphoi",
+                                                         "Aspidoptera falcata",
+                                                         "Megistopoda proxima",
+                                                         "Metelasmus pseudopterus",
+                                                         "Paraeuctenodes similis",
+                                                         "Paratrichobius longicrus",
+                                                         "Speiseria ambigua",
+                                                         "Strebla guajiro",
+                                                         "Strebla mirabilis",
+                                                         "Strebla wiedemanni",
+                                                         "Trichobius dugesioides",
+                                                         "Trichobius furmani",
+                                                         "Trichobius joblingi"))
+
+sample_data(BM.strict.philr)$ParasiteSpecies<- factor(sample_data(BM.strict.philr)$ParasiteSpecies,
+                                                   levels=c("Basilia andersoni",
+                                                            "Basilia ferruginea",
+                                                            "Basilia juquiensis",
+                                                            "Basilia lindolphoi",
+                                                            "Aspidoptera falcata",
+                                                            "Megistopoda proxima",
+                                                            "Metelasmus pseudopterus",
+                                                            "Paraeuctenodes similis",
+                                                            "Paratrichobius longicrus",
+                                                            "Speiseria ambigua",
+                                                            "Strebla guajiro",
+                                                            "Strebla mirabilis",
+                                                            "Strebla wiedemanni",
+                                                            "Trichobius dugesioides",
+                                                            "Trichobius furmani",
+                                                            "Trichobius joblingi"))
+```
+
+Plot ordination of microbiomes from all habitat patches, parasite species are indicated by different colors (Figure 2B)
+
+```{r Ordination of BM by Parasite Species, fig.cap="Figure 2B"}
+plot_ordination(BM.philr, bm.pcoa, color='ParasiteSpecies') + geom_point(size=3) + scale_colour_viridis_d(option="mako") +theme_dark()
+```
+
+Plot ordination of microbiomes from all habitat patches using strictly filtered data, parasite species are indicated by different colors (Figure S6)
+
+```{r Ordination of BM.strict by Parasite Species, fig.cap="Figure S6"}
+plot_ordination(BM.strict.philr, bm.strict.pcoa, color='ParasiteSpecies') + geom_point(size=3) + scale_colour_viridis_d(option="mako") + theme_dark()
+
+```
+
+Plot PCoA for the four parasite species that were found in all REGUA-area patches with Log2 Isolation as color
+
+```{r Ordination of 4-spec dataset by Isolation}
+#Plot PCoA for each well-sampled species dataset with Log2 Scaled Isolation as color
+for(x in 1:length(bm.4spec.pcoa)) {
+  print(plot_ordination(BM.4spec.philr[[x]], bm.4spec.pcoa[[x]], color='Isolation_Scaled_2') + geom_point(size=3) + scale_colour_gradient(low="white", high="red") + theme_dark())
+}
+```
+
+Plot PCoA for the four parasite species that were found in all REGUA-area patches with Log2 Area as color (Figure S7)
+
+```{r Ordination of 4-spec dataset by Area, fig.cap="Figure S7"}
+for(x in 1:length(bm.4spec.pcoa)) {
+  print(plot_ordination(BM.4spec.philr[[x]], bm.4spec.pcoa[[x]], color='Area_Scaled_2', title=(names(bm.4spec.pcoa)[[x]])) + geom_point(size=3) + scale_colour_gradient(low="red", high="white") + theme_dark())
+}
+```
+
+##PERMANOVA on philr PCoAs for individual variables
+Results of these PERMANOVA analyses are presented in Table 1
+Results may vary slightly due to variation in permutations (set seed to get same results each time)
+
+Load necessary libraries
+```{r load libraries, warning=FALSE, message=FALSE}
+library(vegan)
+```
+
+Create new metadata files for each phyloseq object analyzed using PERMANOVA and change all PCoA distance "doubles" to matrices
+```{r}
+metadata.df<-data.frame(sample_data(BM))
+bm.dist.mat<-as.matrix(bm.dist)
+
+metadata.st.df<-data.frame(sample_data(BM.strict))
+bm.st.dist.mat<-as.matrix(bm.strict.dist)
+
+metadata.REGArea.df<-data.frame(sample_data(BM.REGArea.philr))
+bm.REGArea.dist.mat<-as.matrix(bm.REGArea.dist)
+```
+
+Create a metadata and distance file on REGUA-area patches, but with REGUA (source) removed
+```{r Create fragment-only dataset}
+
+metadata.REGArea_frag.df<-metadata.REGArea.df[(metadata.REGArea.df$HabitatType == "Fragmented"),]
+#Remove Trichobius dugesioides, because it only has 4 samples after REGUA is removed
+metadata.REGArea_frag.df<-metadata.REGArea_frag.df[(metadata.REGArea_frag.df$ParasiteSpecies != "Trichobius dugesioides"),]
+
+bm.REGArea_frag.dist.mat <- bm.REGArea.dist.mat[row.names(bm.REGArea.dist.mat) %in% row.names(metadata.REGArea_frag.df), colnames(bm.REGArea.dist.mat) %in% row.names(metadata.REGArea_frag.df)]
+
+#Check that the matrix was created correctly
+ncol(bm.REGArea_frag.dist.mat) == nrow(metadata.REGArea_frag.df)
+nrow(bm.REGArea_frag.dist.mat) == nrow(metadata.REGArea_frag.df)
+
+```
+
+###PERMANOVA for AREA, Log2 Area
+```{r PERMANOVA Area LogArea}
+#REGUA-Area 
+adonis(bm.REGArea.dist.mat~Area, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$Area))
+
+adonis(bm.REGArea.dist.mat~Area_Scaled_2, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$Area_Scaled_2))
+
+#Area Cluster breaks down into REGUA and non-REGUA patches, which is reported as "Protection Status"
+adonis(bm.REGArea.dist.mat~AreaCluster, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$AreaCluster))
+
+#REGUA-Area Unprotected
+adonis(bm.REGArea_frag.dist.mat~Area, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$Area))
+
+adonis(bm.REGArea_frag.dist.mat~Area_Scaled_2, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$Area_Scaled_2))
+```
+
+###PERMANOVA for Isolation and Log2 Isolation
+```{r PERMANOVA Isolation and Log2 Isolation}
+#REGUA-Area patches
+adonis(bm.REGArea.dist.mat~Isolation, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$Isolation))
+
+adonis(bm.REGArea.dist.mat~Isolation_Scaled_2, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$Isolation_Scaled_2))
+
+adonis(bm.REGArea.dist.mat~IsolationCluster, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$IsolationCluster))
+
+#REGUA-Area Unprotected patches
+adonis(bm.REGArea_frag.dist.mat~Isolation, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$Isolation))
+
+adonis(bm.REGArea_frag.dist.mat~Isolation_Scaled_2, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$Isolation_Scaled_2))
+
+```
+
+PERMANOVA on Distance from Source and log2 DtS
+```{r PERMANOVA Distance to Source and Log2 DtS}
+#REGUA-Area unprotected
+#REGUA is the "source" so Distance from itself is not useful, so we only examine the unprotected REGUA-area patches
+adonis(bm.REGArea_frag.dist.mat~DistanceFromSource, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$DistanceFromSource))
+
+adonis(bm.REGArea_frag.dist.mat~DtS_Scaled_2, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$DtS_Scaled_2))
+```
+
+###PERMANOVA of Sampling Site
+```{r PERMANOVA Sampling Site}
+adonis(bm.dist.mat~Fragment, data=metadata.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.dist.mat), metadata.df$Fragment))
+
+adonis(bm.st.dist.mat~Fragment, data=metadata.st.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.st.dist.mat), metadata.st.df$Fragment))
+
+adonis(bm.REGArea.dist.mat~Fragment, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$Fragment))
+
+adonis(bm.REGArea_frag.dist.mat~Fragment, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$Fragment))
+```
+
+###PERMANOVA on Protection Status
+
+```{r PERMANOVA Protection Status}
+adonis(bm.REGArea.dist.mat~HabitatType, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$HabitatType))
+
+```
+
+###PERMANOVA on Region
+
+```{r PERMANOVA Region}
+adonis(bm.dist.mat~Region, data=metadata.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.dist.mat), metadata.df$Region))
+
+adonis(bm.st.dist.mat~Region, data=metadata.st.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.st.dist.mat), metadata.st.df$Region))
+
+```
+
+###PERMANOVA on Parasite Family
+
+```{r PERMANOVA Parasite Family}
+adonis(bm.dist.mat~ParasiteFamily, data=metadata.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.dist.mat), metadata.df$ParasiteFamily))
+
+adonis(bm.st.dist.mat~ParasiteFamily, data=metadata.st.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.st.dist.mat), metadata.st.df$ParasiteFamily))
+
+adonis(bm.REGArea.dist.mat~ParasiteFamily, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$ParasiteFamily))
+
+adonis(bm.REGArea_frag.dist.mat~ParasiteFamily, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$ParasiteFamily))
+
+```
+
+###PERMANOVA on Parasite Species
+```{r PERMANOVA on Parasite Species}
+adonis(bm.dist.mat~ParasiteSpecies, data=metadata.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.dist.mat), metadata.df$ParasiteSpecies))
+
+adonis(bm.st.dist.mat~ParasiteSpecies, data=metadata.st.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.st.dist.mat), metadata.st.df$ParasiteSpecies))
+
+adonis(bm.REGArea.dist.mat~ParasiteSpecies, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$ParasiteSpecies))
+
+adonis(bm.REGArea_frag.dist.mat~ParasiteSpecies, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$ParasiteSpecies))
+```
+
+###PERMANOVA on Parasite and Bat Sex
+First we need to remove NAs from these categories
+```{r Remove NAs from Parasite and Bat Sex}
+#Assign missing values as NA
+metadata.df$BatSex[metadata.df$BatSex==""]<- NA
+metadata.df$ParasiteSex[metadata.df$ParasiteSex==""]<- NA
+metadata.st.df$BatSex[metadata.st.df$BatSex==""]<- NA
+metadata.st.df$ParasiteSex[metadata.st.df$ParasiteSex==""]<- NA
+metadata.REGArea.df$BatSex[metadata.REGArea.df$BatSex==""]<- NA
+metadata.REGArea.df$ParasiteSex[metadata.REGArea.df$ParasiteSex==""]<- NA
+metadata.REGArea_frag.df$BatSex[metadata.REGArea_frag.df$BatSex==""]<- NA
+metadata.REGArea_frag.df$ParasiteSex[metadata.REGArea_frag.df$ParasiteSex==""]<- NA
+
+#Remove NAs from ParasiteSex and BatSex 
+metadata.df.sex <- metadata.df[!is.na(metadata.df$BatSex) & !is.na(metadata.df$ParasiteSex),]
+metadata.st.df.sex <- metadata.st.df[!is.na(metadata.st.df$BatSex) & !is.na(metadata.st.df$ParasiteSex),]
+metadata.REGArea.df.sex <- metadata.REGArea.df[!is.na(metadata.REGArea.df$BatSex) & !is.na(metadata.REGArea.df$ParasiteSex),]
+metadata.REGArea_frag.df.sex <- metadata.REGArea_frag.df[!is.na(metadata.REGArea_frag.df$BatSex) & !is.na(metadata.REGArea_frag.df$ParasiteSex),]
+
+#Now make sure the samples in the distance matrix and in the metadata are the same
+bm.dist.mat.sex <- bm.dist.mat[row.names(bm.dist.mat) %in% row.names(metadata.df.sex), colnames(bm.dist.mat) %in% row.names(metadata.df.sex)]
+
+bm.st.dist.mat.sex <- bm.st.dist.mat[row.names(bm.st.dist.mat) %in% row.names(metadata.st.df.sex), colnames(bm.st.dist.mat) %in% row.names(metadata.st.df.sex)]
+
+bm.REGArea.dist.mat.sex <- bm.REGArea.dist.mat[row.names(bm.REGArea.dist.mat) %in% row.names(metadata.REGArea.df.sex), colnames(bm.REGArea.dist.mat) %in% row.names(metadata.REGArea.df.sex)]
+
+bm.REGArea_frag.dist.mat.sex <- bm.REGArea_frag.dist.mat[row.names(bm.REGArea_frag.dist.mat) %in% row.names(metadata.REGArea_frag.df.sex), colnames(bm.REGArea_frag.dist.mat) %in% row.names(metadata.REGArea_frag.df.sex)]
+
+```
+
+Now do PERMANOVA on Parasite Sex
+
+```{r PERMANOVA Parasite Sex}
+adonis(bm.dist.mat.sex~ParasiteSex, data=metadata.df.sex, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.dist.mat.sex), metadata.df.sex$ParasiteSex))
+
+adonis(bm.st.dist.mat.sex~ParasiteSex, data=metadata.st.df.sex, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.st.dist.mat.sex), metadata.st.df.sex$ParasiteSex))
+
+adonis(bm.REGArea.dist.mat.sex~ParasiteSex, data=metadata.REGArea.df.sex, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat.sex), metadata.REGArea.df.sex$ParasiteSex))
+
+adonis(bm.REGArea_frag.dist.mat.sex~ParasiteSex, data=metadata.REGArea_frag.df.sex, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat.sex), metadata.REGArea_frag.df.sex$ParasiteSex))
+```
+
+PERMANOVA on Bat Sex
+
+```{r PERMANOVA Bat Sex}
+adonis(bm.dist.mat.sex~BatSex, data=metadata.df.sex, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.dist.mat.sex), metadata.df.sex$BatSex))
+
+adonis(bm.st.dist.mat.sex~BatSex, data=metadata.st.df.sex, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.st.dist.mat.sex), metadata.st.df.sex$BatSex))
+
+adonis(bm.REGArea.dist.mat.sex~BatSex, data=metadata.REGArea.df.sex, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat.sex), metadata.REGArea.df.sex$BatSex))
+
+adonis(bm.REGArea_frag.dist.mat.sex~BatSex, data=metadata.REGArea_frag.df.sex, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat.sex), metadata.REGArea_frag.df.sex$BatSex))
+```
+
+###PERMANOVA on Bat Feeding Guild
+
+```{r PERMANOVA Bat Feeding Guild}
+adonis(bm.dist.mat~FeedingGuild, data=metadata.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.dist.mat), metadata.df$FeedingGuild))
+
+adonis(bm.st.dist.mat~FeedingGuild, data=metadata.st.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.st.dist.mat), metadata.st.df$FeedingGuild))
+
+adonis(bm.REGArea.dist.mat~FeedingGuild, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$FeedingGuild))
+
+adonis(bm.REGArea_frag.dist.mat~FeedingGuild, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$FeedingGuild))
+```
+
+###PERMANOVA on Bat Family
+
+```{r PERMANOVA Bat Family}
+adonis(bm.dist.mat~BatFamily, data=metadata.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.dist.mat), metadata.df$BatFamily))
+
+adonis(bm.st.dist.mat~BatFamily, data=metadata.st.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.st.dist.mat), metadata.st.df$BatFamily))
+
+adonis(bm.REGArea.dist.mat~BatFamily, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$BatFamily))
+
+adonis(bm.REGArea_frag.dist.mat~BatFamily, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$BatFamily))
+```
+
+###PERMANOVA on Bat Species
+```{r PERMANOVA Bat Species}
+adonis(bm.dist.mat~BatSpecies, data=metadata.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.dist.mat), metadata.df$BatSpecies))
+
+adonis(bm.st.dist.mat~BatSpecies, data=metadata.st.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.st.dist.mat), metadata.st.df$BatSpecies))
+
+adonis(bm.REGArea.dist.mat~BatSpecies, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$BatSpecies))
+
+adonis(bm.REGArea_frag.dist.mat~BatSpecies, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$BatSpecies))
+```
+
+###PERMANOVA on Individual Bat
+```{r PERMANOVA Individaul Bat}
+adonis(bm.dist.mat~BatID, data=metadata.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.dist.mat), metadata.df$BatID))
+
+adonis(bm.st.dist.mat~BatID, data=metadata.st.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.st.dist.mat), metadata.st.df$BatID))
+
+adonis(bm.REGArea.dist.mat~BatID, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$BatID))
+
+adonis(bm.REGArea_frag.dist.mat~BatID, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$BatID))
+
+```
+
+##Sequential sum-of-squares PERMANOVA on philr PCoAs
+These results are presented in Table 2. The exact numbers may vary due to permutation (set seed to get the same result each time). Here we account for the effect of parasite species first and then the effect of individual variables + the interaction between parasite species and individualv ariables.
+
+```{r Seq Sum of Squares}
+#Homoscedasticity of Parasite Species
+permutest(betadisper(dist(bm.dist.mat), metadata.df$ParasiteSpecies))
+permutest(betadisper(dist(bm.st.dist.mat), metadata.st.df$ParasiteSpecies))
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$ParasiteSpecies))
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$ParasiteSpecies))
+permutest(betadisper(dist(bm.dist.mat.sex), metadata.df.sex$ParasiteSpecies))
+permutest(betadisper(dist(bm.st.dist.mat.sex), metadata.st.df.sex$ParasiteSpecies))
+permutest(betadisper(dist(bm.REGArea.dist.mat.sex), metadata.REGArea.df.sex$ParasiteSpecies))
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat.sex), metadata.REGArea_frag.df.sex$ParasiteSpecies))
+
+#Region
+adonis(bm.dist.mat ~ ParasiteSpecies + Region + ParasiteSpecies:Region, data=metadata.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.dist.mat), metadata.df$Region))
+
+adonis(bm.st.dist.mat ~ ParasiteSpecies + Region + ParasiteSpecies:Region, data=metadata.st.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.st.dist.mat), metadata.st.df$Region))
+
+#Bat ID
+adonis(bm.dist.mat ~ ParasiteSpecies + BatID + ParasiteSpecies:BatID, data=metadata.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.dist.mat), metadata.df$BatID))
+
+adonis(bm.st.dist.mat ~ ParasiteSpecies + BatID + ParasiteSpecies:BatID, data=metadata.st.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.st.dist.mat), metadata.st.df$BatID))
+
+adonis(bm.REGArea.dist.mat ~ ParasiteSpecies + BatID + ParasiteSpecies:BatID, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$BatID))
+
+adonis(bm.REGArea_frag.dist.mat ~ ParasiteSpecies + BatID + ParasiteSpecies:BatID, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$BatID))
+
+#Bat Species
+adonis(bm.dist.mat ~ ParasiteSpecies + BatSpecies + ParasiteSpecies:BatSpecies, data=metadata.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.dist.mat), metadata.df$BatSpecies))
+
+adonis(bm.st.dist.mat ~ ParasiteSpecies + BatSpecies + ParasiteSpecies:BatSpecies, data=metadata.st.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.st.dist.mat), metadata.st.df$BatSpecies))
+
+adonis(bm.REGArea.dist.mat ~ ParasiteSpecies + BatSpecies + ParasiteSpecies:BatSpecies, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$BatSpecies))
+
+adonis(bm.REGArea_frag.dist.mat ~ ParasiteSpecies + BatSpecies + ParasiteSpecies:BatSpecies, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$BatSpecies))
+
+#Bat Sex
+adonis(bm.dist.mat.sex ~ ParasiteSpecies + BatSex + ParasiteSpecies:BatSex, data=metadata.df.sex, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.dist.mat.sex), metadata.df.sex$BatSex))
+
+adonis(bm.st.dist.mat.sex ~ ParasiteSpecies + BatSex + ParasiteSpecies:BatSex, data=metadata.st.df.sex, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.st.dist.mat.sex), metadata.st.df.sex$BatSex))
+
+adonis(bm.REGArea.dist.mat.sex ~ ParasiteSpecies + BatSex + ParasiteSpecies:BatSex, data=metadata.REGArea.df.sex, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat.sex), metadata.REGArea.df.sex$BatSex))
+
+adonis(bm.REGArea_frag.dist.mat.sex ~ ParasiteSpecies + BatSex + ParasiteSpecies:BatSex, data=metadata.REGArea_frag.df.sex, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat.sex), metadata.REGArea_frag.df.sex$BatSex))
+
+#Log2 Area
+adonis(bm.REGArea.dist.mat ~ ParasiteSpecies + Area_Scaled_2 + ParasiteSpecies:Area_Scaled_2, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$Area_Scaled_2))
+
+adonis(bm.REGArea_frag.dist.mat ~ ParasiteSpecies + Area_Scaled_2 + ParasiteSpecies:Area_Scaled_2, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$Area_Scaled_2))
+
+#Log2 Isolation
+adonis(bm.REGArea.dist.mat ~ ParasiteSpecies + Isolation_Scaled_2 + ParasiteSpecies:Isolation_Scaled_2, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$Isolation_Scaled_2))
+
+adonis(bm.REGArea_frag.dist.mat ~ ParasiteSpecies + Isolation_Scaled_2 + ParasiteSpecies:Isolation_Scaled_2, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$Isolation_Scaled_2))
+
+#Log2 Distance from Source
+adonis(bm.REGArea_frag.dist.mat ~ ParasiteSpecies + DtS_Scaled_2 + ParasiteSpecies:DtS_Scaled_2, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$DtS_Scaled_2))
+
+#Protection Status
+adonis(bm.REGArea.dist.mat ~ ParasiteSpecies + HabitatType + ParasiteSpecies:HabitatType, data=metadata.REGArea.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea.dist.mat), metadata.REGArea.df$HabitatType))
+
+#Sampling Site
+adonis(bm.REGArea_frag.dist.mat ~ ParasiteSpecies + Fragment + ParasiteSpecies:Fragment, data=metadata.REGArea_frag.df, permutations=9999, method="euclidean")
+permutest(betadisper(dist(bm.REGArea_frag.dist.mat), metadata.REGArea_frag.df$Fragment))
+
+```
+
+##PERMANOVA on well-sampled species
+
+Get distance matrix and metadata for for each of the well-sampled species
+
+```{r format metadata and dist mat}
+bm.species.dist<-as.list(1:4)
+for(x in 1:length(bm.4spec.philr)) {
+  matx<-as.matrix(bm.4spec.philr[[x]])
+  bm.species.dist[[x]]<-as.matrix(dist(matx, method="euclidean"))
+}
+names(bm.species.dist)<-names(bm.4spec.philr)
+
+metadata.species.df<- as.list(1:4)
+for(x in 1:length(BM.4spec.philr)) {
+  metadata.species.df[[x]]<-as.data.frame(sample_data(BM.4spec.philr[[x]]))
+}
+names(metadata.species.df)<-names(BM.4spec.philr)
+
+```
+
+###PERMANOVA for Habitat Type
+Speiseria ambigua was not collected from REGUA, so cannot include it in these analyses
+
+```{r PERMANOVA Habitat Type}
+for (x in c(1,3,4)) {
+  d<-as.matrix(bm.species.dist[[x]])
+  m<-data.frame(metadata.species.df[[x]])
+  print(names(metadata.species.df)[[x]])
+  print(adonis(d~HabitatType, data=m, permutations=9999, method="euclidean"))
+  print(permutest(betadisper(dist(d), m$HabitatType)))
+}
+
+```
+
+###PERMANOVA for sampling site
+
+```{r PERMANOVA sampling site}
+for (x in 1:length(bm.species.dist)) {
+  d<-as.matrix(bm.species.dist[[x]])
+  m<-data.frame(metadata.species.df[[x]])
+  print(names(metadata.species.df)[[x]])
+  print(adonis(d~Fragment, data=m, permutations=9999, method="euclidean"))
+  print(permutest(betadisper(dist(d), m$Fragment)))
+}
+
+```
+
+###PERMANOVA for Log2 Area
+
+```{r PERMANOVA Log2 Area}
+for (x in 1:length(bm.species.dist)) {
+  d<-as.matrix(bm.species.dist[[x]])
+  m<-data.frame(metadata.species.df[[x]])
+  print(names(metadata.species.df)[[x]])
+  print(adonis(d~Area_Scaled_2, data=m, permutations=9999, method="euclidean"))
+  print(permutest(betadisper(dist(d), m$Area_Scaled_2)))
+}
+
+```
+
+###PERMANOVA for Log2 Isolation
+
+```{r PERMANOVA Log2 Isolation}
+for (x in 1:length(bm.species.dist)) {
+  d<-as.matrix(bm.species.dist[[x]])
+  m<-data.frame(metadata.species.df[[x]])
+  print(names(metadata.species.df)[[x]])
+  print(adonis(d~Isolation_Scaled_2, data=m, permutations=9999, method="euclidean"))
+  print(permutest(betadisper(dist(d), m$Isolation_Scaled_2)))
+}
+```
+
+###PERMANOVA for Bat Sex
+
+```{r PERMANOVA Bat Sex}
+#Look for samples that are missing parasite sex
+lapply(metadata.species.df, function(x) x$BatSex=="")
+lapply(metadata.species.df, function(x) is.na(x$BatSex))
+
+#Remove samples that are missing data
+metadata.species.batsex.df<-lapply(metadata.species.df, function(x) {
+  x$BatSex[x$BatSex==""]<-NA
+  z<-x[complete.cases(x)]
+  return(z)
+})
+
+#Remove the missing samples from the distance matrix
+bm.species.batsex.dist<-as.list(1:4)
+for (x in 1:4){
+  s<-row.names(metadata.species.batsex.df[[x]])
+  bm.species.batsex.dist[[x]]<-bm.species.dist[[x]][row.names(bm.species.dist[[x]]) %in% s, colnames(bm.species.dist[[x]]) %in% s]
+}
+names(bm.species.batsex.dist)<-names(bm.species.dist)
+
+#do a spot check
+row.names(bm.species.batsex.dist[[1]]) == row.names(metadata.species.batsex.df[[1]])
+colnames(bm.species.batsex.dist[[1]]) == row.names(metadata.species.batsex.df[[1]])
+
+for (x in 1:4) {
+  d<-as.matrix(bm.species.batsex.dist[[x]])
+  m<-data.frame(metadata.species.batsex.df[[x]])
+  print(names(metadata.species.batsex.df)[[x]])
+  print(adonis(d~BatSex, data=m, permutations=9999, method="euclidean"))
+  print(permutest(betadisper(dist(d), m$BatSex)))
+}
+
+```
+
+###PERMANOVA for Fly Sex
+
+```{r PERMANOVA Fly Sex}
+#Look for samples that are missing parasite sex
+lapply(metadata.species.df, function(x) x$ParasiteSex=="")
+
+#Remove samples that are missing data
+metadata.species.sex.df<-lapply(metadata.species.df, function(x) {
+  x$ParasiteSex[x$ParasiteSex==""]<-NA
+  z<-x[complete.cases(x)]
+  return(z)
+})
+
+#Remove the missing samples from the distance matrix
+bm.species.sex.dist<-as.list(1:4)
+for (x in 1:4){
+  s<-row.names(metadata.species.sex.df[[x]])
+  bm.species.sex.dist[[x]]<-bm.species.dist[[x]][row.names(bm.species.dist[[x]]) %in% s, colnames(bm.species.dist[[x]]) %in% s]
+}
+names(bm.species.sex.dist)<-names(bm.species.dist)
+
+#do a spot check
+row.names(bm.species.sex.dist[[4]]) == row.names(metadata.species.sex.df[[4]])
+colnames(bm.species.sex.dist[[4]]) == row.names(metadata.species.sex.df[[4]])
+
+for (x in 1:4) {
+  d<-as.matrix(bm.species.sex.dist[[x]])
+  m<-data.frame(metadata.species.sex.df[[x]])
+  print(names(metadata.species.sex.df)[[x]])
+  print(adonis(d~ParasiteSex, data=m, permutations=9999, method="euclidean"))
+  print(permutest(betadisper(dist(d), m$ParasiteSex)))
+}
+```
+
+##Plots of ASV richness by Area, Isolation, and Distance to Source
+These are the data used to produce Figure 3
+
+Get total number of taxa for each habitat fragment and for each species from BM.REGArea object
+
+```{r function presence or absence}
+#This function converts counts to presence absence
+filterfun_presabs<- function(x) {
+  x[x>0]<-1
+  x[x<1]<-0
+  return(x)
+}
+```
+
+Use the function to transorm counts to presence/absence
+
+```{r transform data, warning=FALSE, message=FALSE}
+BM.REGArea.pa<- transform_sample_counts(BM.REGArea, fun=filterfun_presabs)
+
+#calculate the sum of ASVs in each sample and do a spot check that transformation worked
+BM.REGArea.sampsum<- sample_sums(BM.REGArea.pa)
+length(unique(otu_table(BM.REGArea)[,"Sample885_2"])) == BM.REGArea.sampsum["Sample885_2"]
+
+```
+
+Create a dataframe of the transformed phyloseq objects and format the dataframe
+
+```{r create dataframe and format}
+BM.REGArea.pa.df <- psmelt(BM.REGArea.pa)
+
+#Create a new dataframe the contains the per sample ASV richness
+BM.REGArea.richness <- BM.REGArea.pa.df %>% group_by(Sample) %>% summarise(Richness=sum(Abundance))
+
+#Do a spot check
+head(BM.REGArea.richness)
+sum(BM.REGArea.pa.df$Abundance[BM.REGArea.pa.df$Sample=="Sample1033_1"])
+sum(BM.REGArea.pa.df$Abundance[BM.REGArea.pa.df$Sample=="Sample1017"])
+
+#Subset the melted dataframe to the relevent columns
+BM.REGArea.sampdiversity.df <- unique(BM.REGArea.pa.df[,c("Sample","Fragment","PubFragmentName", "ParasiteSpecies","Area","Isolation","DistanceFromSource")])
+
+#Merge Richness and Metadata, condense dataframe so that one row per sample
+BM.REGArea.sampdiversity.df<-merge(BM.REGArea.richness, BM.REGArea.sampdiversity.df, by="Sample")
+
+#Replace NAs in Distance From Source with 0
+BM.REGArea.sampdiversity.df$DistanceFromSource[is.na(BM.REGArea.sampdiversity.df$DistanceFromSource)]<-0
+```
+
+Make the blox plots of Decreasing AREA by richness (Figure 3A)
+
+```{r boxplot Area by Richness}
+#Order the fragments by decreasing area
+p_area<- ggplot(BM.REGArea.sampdiversity.df, aes(x=reorder(PubFragmentName, -Area), y=Richness)) + geom_boxplot(width=0.5, outlier.shape=NA) + geom_jitter(width=0.2, alpha=0.5, stroke=0, shape=16)
+p_area
+
+#Do Kruskal-Wallis instead of one-way anova because data is not normally distributed (Fragment treated as categorical variable)
+KW.area <- kruskal.test(Richness ~ Fragment, data = BM.REGArea.sampdiversity.df)
+KW.area
+
+#Do a Spearman correlation (treats area as a continuous variable)
+spearman.area <-cor.test(y=BM.REGArea.sampdiversity.df$Richness, x=BM.REGArea.sampdiversity.df$Area,  method = "spearman")
+spearman.area
+
+```
+
+Make the blox plots of Increasing isolation by richness (Figure 3C)
+
+```{r boxplot isolation}
+#Reorder fragments by increasing isolation
+p_isolation<- ggplot(BM.REGArea.sampdiversity.df, aes(x=reorder(PubFragmentName, Isolation), y=Richness)) + 
+  geom_boxplot(width=0.5, outlier.shape=NA) + geom_jitter(width=0.2, alpha=0.5, stroke=0, shape=16)
+p_isolation
+
+#Do Kruskal-Wallis instead of one-way anova because data is not normally distributed (Fragment treated as categorical variable)
+KW.isolation <- kruskal.test(Richness ~ Fragment, data = BM.REGArea.sampdiversity.df)
+KW.isolation
+#Do a Spearman correlation (treats area as a continuous variable)
+spearman.isolation <-cor.test(y=BM.REGArea.sampdiversity.df$Richness, x=BM.REGArea.sampdiversity.df$Isolation,  method = "spearman")
+spearman.isolation
+```
+
+Make the blox plots of Increasing distance to source by richness (Figure 3B)
+
+```{r boxplot DtS}
+p_dts<- ggplot(BM.REGArea.sampdiversity.df, aes(x=reorder(PubFragmentName, DistanceFromSource), y=Richness)) + 
+  geom_boxplot(width=0.5, outlier.shape=NA) + geom_jitter(width=0.2, alpha=0.5, stroke=0, shape=16)
+p_dts
+
+#Do Kruskal-Wallis instead of one-way anova because data is not normally distributed (Fragment treated as categorical variable)
+KW.dts <- kruskal.test(Richness ~ Fragment, data = BM.REGArea.sampdiversity.df)
+KW.dts
+#Do a Spearman correlation (treats area as a continuous variable)
+spearman.dts <-cor.test(y=BM.REGArea.sampdiversity.df$Richness, x=BM.REGArea.sampdiversity.df$DistanceFromSource,  method = "spearman")
+spearman.dts
+```
+
+##Network Estimation for individual fragments
+https://github.com/zdk123/SpiecEasi
+
+Load necessary libraries. This downloads a branch of SpiecEasi that provides a patch to an error in v1.1.2
+```{r load lib}
+#library(devtools)
+#install_github("zdk123/SpiecEasi", ref="hugemb-patch", force=TRUE)
+library(SpiecEasi)
+library(phyloseq)
+```
+
+Split the filtered phyloseq object by fragment
+MI6, F6, and F3 not included, because sampled fewer than 10 times
+LI6 and LI8 not included, because part of southern fragments
+
+```{r format data, message=FALSE, warning=FALSE}
+# BM.REGUA <- subset_samples(BM, PubFragmentName=="REGUA")
+# BM.REGUA2 <- subset_samples(BM, PubFragmentName=="REGUA2")
+# BM.REGUA3 <- subset_samples(BM, PubFragmentName=="REGUA3")
+# BM.F10<- subset_samples(BM, PubFragmentName=="F10")
+# BM.F9<- subset_samples(BM, PubFragmentName=="F9")
+# BM.F8<- subset_samples(BM, PubFragmentName=="F8")
+# BM.F7<- subset_samples(BM, PubFragmentName=="F7")
+# BM.F5<- subset_samples(BM, PubFragmentName=="F5")
+# BM.F4<- subset_samples(BM, PubFragmentName=="F4")
+# BM.F2<- subset_samples(BM, PubFragmentName=="F2")
+# BM.F1<- subset_samples(BM, PubFragmentName=="F1")
+#
+# BM.fragment.list<-list(BM.REGUA,BM.REGUA2,BM.REGUA3,BM.F10,BM.F9,BM.F8,BM.F7,BM.F5,BM.F4,BM.F2,BM.F1)
+# 
+# names(BM.fragment.list)<-c("BM.REGUA","BM.REGUA2","BM.REGUA3","BM.F10","BM.F9","BM.F8","BM.F7", "BM.F5","BM.F4","BM.F2","BM.F1")
+# 
+# #Remove taxa not present in at least one sample
+# BM.fragment.list<-lapply(BM.fragment.list, function(x) filter_taxa(x, function(y) sum(y) > 0, TRUE))
+# 
+
+BM.fragment.list<-readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/BMfragmentlist.RData")))
+```
+
+Generate the networks 
+R runs out of memory when all the datasets are executed in a list and you will need to run this multiple times to appropriately tune lambda
+
+```{r generate networks}
+# pargs<- list(rep.num=50, seed=10010, ncores=2)
+
+# seBM.REGUA <- spiec.easi(BM.fragment.list[["BM.REGUA"]], method='mb', lambda.min.ratio=1e-2, nlambda=50, pulsar.params=pargs, maxdf=ntaxa(BM.fragment.list[["BM.REGUA"]]))
+# getStability(seBM.REGUA) #0.04820575
+# sum(getRefit(seBM.REGUA))/2 #151
+# seBM.REGUA$select$stars$summary
+# seBM.REGUA$lambda
+seBM.REGUA<- readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/seBM.REGUA.RData")))
+
+# seBM.REGUA2 <- spiec.easi(BM.fragment.list[["BM.REGUA2"]], method='mb', lambda.min.ratio=1e-2, nlambda=50, pulsar.params=pargs, maxdf=ntaxa(BM.fragment.list[["BM.REGUA2"]]))
+# getStability(seBM.REGUA2) #0.04804912
+# sum(getRefit(seBM.REGUA2))/2 #129
+# seBM.REGUA2$select$stars$summary
+# seBM.REGUA2$lambda
+seBM.REGUA2<- readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/seBM.REGUA2.RData")))
+
+# seBM.REGUA3 <- spiec.easi(BM.fragment.list[["BM.REGUA3"]], method='mb', lambda.min.ratio=5e-2, nlambda=50, pulsar.params=pargs, maxdf=ntaxa(BM.fragment.list[["BM.REGUA3"]]))
+# getStability(seBM.REGUA3) #0.04819195
+# sum(getRefit(seBM.REGUA3))/2 #180
+# seBM.REGUA3$select$stars$summary
+# seBM.REGUA3$lambda
+seBM.REGUA3<- readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/seBM.REGUA3.RData")))
+
+# seBM.F10<- spiec.easi(BM.fragment.list[["BM.F10"]], method='mb', lambda.min.ratio=5e-3, nlambda=50, pulsar.params=pargs, maxdf=ntaxa(BM.fragment.list[["BM.F10"]]))
+# getStability(seBM.F10) #0.04980835
+# sum(getRefit(seBM.F10))/2 #134
+# seBM.F10$select$stars$summary
+# seBM.F10$lambda
+seBM.F10<- readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/seBM.F10.RData")))
+
+# seBM.F9<- spiec.easi(BM.fragment.list[["BM.F9"]], method='mb', lambda.min.ratio=5e-4, nlambda=50, pulsar.params=pargs, maxdf=ntaxa(BM.fragment.list[["BM.F9"]]))
+# getStability(seBM.F9) # 0.04836035
+# sum(getRefit(seBM.F9))/2 #79
+# seBM.F9$select$stars$summary
+# seBM.F9$lambda
+seBM.F9<- readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/seBM.F9.RData")))
+
+# seBM.F8<- spiec.easi(BM.fragment.list[["BM.F8"]], method='mb', lambda.min.ratio=5e-4, nlambda=50, pulsar.params=pargs, maxdf=ntaxa(BM.fragment.list[["BM.F8"]]))
+# getStability(seBM.F8) #0.04829453
+# sum(getRefit(seBM.F8))/2 #47
+# seBM.F8$select$stars$summary
+# seBM.F8$lambda
+seBM.F8<- readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/seBM.F8.RData")))
+
+# seBM.F7<- spiec.easi(BM.fragment.list[["BM.F7"]], method='mb', lambda.min.ratio=1e-3, nlambda=50, pulsar.params=pargs, maxdf=ntaxa(BM.fragment.list[["BM.F7"]]))
+# getStability(seBM.F7) #0.04827427
+# sum(getRefit(seBM.F7))/2 #59
+# seBM.F7$select$stars$summary
+# seBM.F7$lambda
+seBM.F7<- readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/seBM.F7.RData")))
+
+# seBM.F5<- spiec.easi(BM.fragment.list[["BM.F5"]], method='mb', lambda.min.ratio=5e-2, nlambda=50, pulsar.params=pargs, maxdf=ntaxa(BM.fragment.list[["BM.F5"]]))
+# getStability(seBM.F5) #0.04976456
+# sum(getRefit(seBM.F5))/2 #54
+# seBM.F5$select$stars$summary
+# seBM.F5$lambda
+seBM.F5<- readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/seBM.F5.RData")))
+
+# seBM.F4<- spiec.easi(BM.fragment.list[["BM.F4"]], method='mb', lambda.min.ratio=1e-3, nlambda=50, pulsar.params=pargs, maxdf=ntaxa(BM.fragment.list[["BM.F4"]]))
+# getStability(seBM.F4) #0.04920704
+# sum(getRefit(seBM.F4))/2 #146
+# seBM.F4$select$stars$summary
+# seBM.F4$lambda
+seBM.F4<- readRDS(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/seBM.F4.RData"))
+
+# seBM.F2<- spiec.easi(BM.fragment.list[["BM.F2"]], method='mb', lambda.min.ratio=1e-8, nlambda=20, pulsar.params=pargs, maxdf=ntaxa(BM.fragment.list[["BM.F2"]]))
+# getStability(seBM.F2) #0.04932737
+# sum(getRefit(seBM.F2))/2 #89
+# seBM.F2$select$stars$summary
+# seBM.F2$lambda
+seBM.F2<- readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/seBM.F2.RData"))) 
+
+# seBM.F1<- spiec.easi(BM.fragment.list[["BM.F1"]], method='mb', lambda.min.ratio=1e-5, nlambda=20, pulsar.params=pargs, maxdf=ntaxa(BM.fragment.list[["BM.F1"]]))
+# getStability(seBM.F1) # 0.04851495
+# sum(getRefit(seBM.F1))/2 #147
+# seBM.F1$select$stars$summary
+# seBM.F1$lambda
+seBM.F1<- readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/seBM.F1.RData")))
+
+```
+
+Convert SpiecEasi networks into igraph adjaceny matrices
+
+```{r}
+#Make list of graph objects
+seBM.combo <- list(seBM.REGUA,seBM.REGUA2,seBM.REGUA3,seBM.F10,seBM.F9,seBM.F8,seBM.F7,seBM.F5,seBM.F4,seBM.F2,seBM.F1)
+names(seBM.combo) <- c("seBM.REGUA","seBM.REGUA2","seBM.REGUA3","seBM.F10","seBM.F9","seBM.F8","seBM.F7","seBM.F5","seBM.F4","seBM.F2","seBM.F1")
+
+#Convert graph objects to adjacency matrices
+seBM_graph <- Map(function(x,y) adj2igraph(getRefit(x), vertex.attr=list(name=taxa_names(y))), seBM.combo, BM.fragment.list)
+```
+
+##Examine Edge Confidence
+Use the subsampling scheme within SpiecEasi to examine whether sites where we have more samples also had more "high-confidence" edges (edges that were present at least 80% of the time)
+```{r edge confidence}
+#Estimate proportion of high confidence edges
+Edge_Confidence<-lapply(seBM.combo, function(x) {
+  y <- getOptMerge(x)
+  length(y[y>0.79])/length(y)
+})
+
+#make a dataframe with sample size
+Edge_Confidence<- as.data.frame(t(as.data.frame(Edge_Confidence)))
+colnames(Edge_Confidence)<-"Proportion_High_Confidence_Edges"
+Edge_Confidence$SampleSize <- c(22,16,21,17,14,15,13,11,20,11,11)
+
+#plot the sample size x edge confidence plot
+ggplot(data=Edge_Confidence, aes(x=SampleSize, y=Proportion_High_Confidence_Edges)) + geom_point() + geom_text(aes(label=row.names(Edge_Confidence)),hjust=0, vjust=0) 
+
+#Do a Spearman correlation (treats sample size as a continuous variable)
+cor.test(y=Edge_Confidence$Proportion_High_Confidence_Edges, x=Edge_Confidence$SampleSize,  method = "spearman")
+
+```
+
+##Estimate Modularity from SpiecEasi Networks
+
+Load necessary libraries
+```{r load lib}
+
+library(igraph)
+```
+
+Estimate leading eigenvector modularity
+```{r}
+#Leading eigen vector modularity
+clusters_le<-lapply(seBM_graph, function(x) cluster_leading_eigen(x))
+
+```
+
+###Create null network distribution for each sampling site and estimate modularity of the null network
+https://igraph.org/r/doc/keeping_degseq.html
+
+igraph rewire does not save all of the rewiring trials, so we have to write a loop that will do that for us. Since we only want to compare the modularity of each network centered by the null distribution, we will only save the modularity of each rewiring
+
+```{r}
+#create a matrix to store the results
+seBM_null_mod<-matrix(data=NA, nrow=100, ncol=length(seBM_graph))
+
+#loop through the graph object
+for (g in 1:length(seBM_graph)) {
+  #loop through the number of iterations
+  for (iteration in 1:100) {
+    #create a null graph
+    null_g<-rewire(seBM_graph[[g]], with=keeping_degseq(niter=vcount(seBM_graph[[g]])*10))
+    #now estimate the leading eigen modularity of the network
+    null_g_mod<-tryCatch(cluster_leading_eigen(null_g, options=list(maxiter=10000)))
+    #Add the LE modularity to the matrix
+    seBM_null_mod[iteration,g]<-modularity(null_g, membership=null_g_mod$membership)
+  }
+}
+
+colnames(seBM_null_mod)<-names(seBM_graph)
+```
+
+
+###Format the Modularity for examination with XY Plots
+Create a dataframe that contains the network summary statistics for each fragment called Modularity.df
+
+```{r format modularity data}
+BM.REGArea.long<-psmelt(BM.REGArea)
+head(BM.REGArea.long)
+
+#Select the metadata (area, isolation, distance to source, habitat type) for each fragment
+Modularity.df<-unique(BM.REGArea.long[,c("PubFragmentName","Area_Scaled_2","Isolation_Scaled_2","DtS_Scaled_2","HabitatType")])
+
+#Remove the fragments that weren't used in SpiecEasi analysis
+Modularity.df<-Modularity.df[Modularity.df$PubFragmentName!="F6" & Modularity.df$PubFragmentName!="F3",]
+
+#Set the graph name as the row name
+row.names(Modularity.df)<-paste("seBM",Modularity.df$PubFragmentName, sep=".")
+
+#Get the per fragment sample size and add to Modularity.df
+Modularity.df$SampleSize <- rep(NA, nrow(Modularity.df))
+for (x in Modularity.df$PubFragmentName) {
+  Modularity.df$SampleSize[Modularity.df$PubFragmentName==x]<-length(which(sample_data(BM.REGArea)$PubFragmentName==x))}
+
+#Spot check the values
+length(which(sample_data(BM.REGArea)$PubFragmentName=="REGUA3")) == Modularity.df["seBM.REGUA3","SampleSize"]
+
+#Add leading eigen modularity to Modularity.df and as vertex attribute to the graph objects
+Modularity.df$Modularity_LE<-NA
+for (x in 1:length(seBM_graph)) {
+  Modularity.df[names(seBM_graph)[x],"Modularity_LE"]<-clusters_le[[x]]$modularity
+  V(seBM_graph[[x]])$module.le<-clusters_le[[x]]$membership
+}
+V(seBM_graph$seBM.REGUA)$module.le
+
+#Add the mean of the null distribution LE modularity to to Modularity.df
+Modularity.df$Modularity_LE_Null<-NA
+for (x in 1:length(seBM_graph)) {
+  Modularity.df[names(seBM_graph)[x],"Modularity_LE_Null"]<-mean(seBM_null_mod[,x])
+}
+```
+
+###Estimate Z-Score modularity for measured graphs and center the modularity of the measured networks by the modularity of the null networks
+
+```{r Centered and ZScore}
+Modularity.df$Modularity_LE_ZScore<-scale(Modularity.df$Modularity_LE, center=TRUE, scale=TRUE)
+
+Modularity.df$Modularity_LE_Centered<-NA
+for (x in 1:length(row.names(Modularity.df))) {
+  Modularity.df[x,"Modularity_LE_Centered"]<-Modularity.df[x,"Modularity_LE"]-Modularity.df[x,"Modularity_LE_Null"]
+}
+
+```
+
+###Estimate Z-score for measured graphs compared to the null graphs
+
+```{r ZScore by Null}
+Modularity.df$Modularity_LE_Null_ZScore<-NA
+
+for (g in 1:length(colnames(seBM_null_mod))) {
+  distribution<-c(seBM_null_mod[,g], Modularity.df$Modularity_LE[colnames(seBM_null_mod)[g]==row.names(Modularity.df)])
+  null_mean<-mean(distribution)
+  print(null_mean)
+  null_sd<-sd(distribution)
+  print(null_sd)
+  zscore<-(Modularity.df$Modularity_LE[colnames(seBM_null_mod)[g]==row.names(Modularity.df)] - null_mean)/null_sd
+  Modularity.df$Modularity_LE_Null_ZScore[colnames(seBM_null_mod)[g]==row.names(Modularity.df)]<-zscore
+}
+
+head(Modularity.df)
+```
+
+##Plots of Modularity Measures
+
+###Plot Modularity by Protection Status
+```{r Plot Modularity by Protection Stat and MannWhitney}
+#Uncorrected Modularity
+#Figure S8
+ggplot(data=Modularity.df, aes(x=reorder(HabitatType, -Area_Scaled_2), y=Modularity_LE), label=HabitatType) + geom_boxplot() + geom_point() + geom_text(aes(label=PubFragmentName),hjust=0, vjust=0) + scale_y_continuous(expand = c(0, 0), limits = c(0, 1.1))
+
+#Z-Score modularity compared to null graph
+ggplot(data=Modularity.df, aes(x=reorder(HabitatType, -Area_Scaled_2), y=Modularity_LE_Null_ZScore), label=PubFragmentName) + geom_boxplot() + geom_point() +geom_text(aes(label=PubFragmentName),hjust=0, vjust=0)
+
+#Centered modularity compared to null graph
+ggplot(data=Modularity.df, aes(x=reorder(HabitatType, -Area_Scaled_2), y=Modularity_LE_Centered), label=PubFragmentName) + geom_boxplot() + geom_point() +geom_text(aes(label=PubFragmentName))
+
+#Z-Score Modularity
+#Figure 5
+ggplot(data=Modularity.df, aes(x=reorder(HabitatType, -Area_Scaled_2), y=Modularity_LE_ZScore)) + geom_boxplot() + geom_point() + geom_text(aes(label=PubFragmentName),hjust=0, vjust=0) + theme_bw()
+
+#Mann-Whitney U test
+wilcox.test(Modularity.df$Modularity_LE~Modularity.df$HabitatType) #W = 4, p-value = 0.1333
+wilcox.test(Modularity.df$Modularity_LE_Centered~Modularity.df$HabitatType) #W = 6, p-value = 0.2788
+wilcox.test(Modularity.df$Modularity_LE_Null_ZScore~Modularity.df$HabitatType) #W = 5, p-value = 0.1939
+wilcox.test(Modularity.df$Modularity_LE_ZScore~Modularity.df$HabitatType) #W = 4, p-value = 0.1333
+
+```
+
+###Plot Modularity by Habitat Patch, decreasing by Area
+
+```{r Plot Mod by Fragement}
+#Uncorrected Modularity
+#Figure S8
+ggplot(data=Modularity.df, aes(x=reorder(PubFragmentName,-Area_Scaled_2), y=Modularity_LE)) + geom_point()
+
+#Centered Modularity compared to null network
+ggplot(data=Modularity.df, aes(x=reorder(PubFragmentName,-Area_Scaled_2), y=Modularity_LE_Centered)) + geom_point()
+
+#Z-Score Modularity
+#Figure 5
+ggplot(data=Modularity.df, aes(x=reorder(PubFragmentName,-Area_Scaled_2), y=Modularity_LE_ZScore)) + geom_point()
+
+#Z-Score Modularity compared to null networks
+ggplot(data=Modularity.df, aes(x=reorder(PubFragmentName,-Area_Scaled_2), y=Modularity_LE_Null_ZScore)) + geom_point()
+```
+
+###Plot modularity by PubFragmentName increasing Isolation
+
+```{r Plot Mod by Isolation}
+#Uncorrected Modularity
+ggplot(data=Modularity.df, aes(x=reorder(PubFragmentName, Isolation_Scaled_2), y=Modularity_LE)) + geom_point() 
+
+#Z-score modularity
+ggplot(data=Modularity.df, aes(x=reorder(PubFragmentName, Isolation_Scaled_2), y=Modularity_LE_ZScore)) + geom_point()
+
+#Z-Score Modularity compared to null distribution
+ggplot(data=Modularity.df, aes(x=reorder(PubFragmentName, Isolation_Scaled_2), y=Modularity_LE_Null_ZScore)) + geom_point() 
+
+#Centered Modularity compared to null distribution
+ggplot(data=Modularity.df, aes(x=reorder(PubFragmentName, Isolation_Scaled_2), y=Modularity_LE_Centered)) + geom_point() 
+
+```
+
+###Plot modularity by PubFragmentName by increasing distance from a source
+
+```{r Plot Mod by DtS}
+#REGUA sites have value "NA" and are placed at the end of the plot by default, but should be on the left side of the plot
+#Uncorrected Modularity
+head(Modularity.df)
+ggplot(data=Modularity.df, aes(x=reorder(PubFragmentName, DtS_Scaled_2), y=Modularity_LE)) + geom_point() 
+
+#Z-score modularity compared to null graphs
+ggplot(data=Modularity.df, aes(x=reorder(PubFragmentName, DtS_Scaled_2), y=Modularity_LE_Null_ZScore)) + geom_point()
+
+#Centered modularity compared to null graphs
+ggplot(data=Modularity.df, aes(x=reorder(PubFragmentName, DtS_Scaled_2), y=Modularity_LE_Centered)) + geom_point() 
+
+#Z-score modularity
+ggplot(data=Modularity.df, aes(x=reorder(PubFragmentName, DtS_Scaled_2), y=Modularity_LE_ZScore)) + geom_point()
+```
+
+###Plot modularity by fragment decreasing by sample size
+
+```{r Plot Mod by Sample Size}
+#Uncorrected Modularity
+ggplot(data=Modularity.df, aes(x=reorder(PubFragmentName, -SampleSize), y=Modularity_LE)) + geom_point() 
+
+#Z-Score Modularity
+ggplot(data=Modularity.df, aes(x=reorder(PubFragmentName, -SampleSize), y=Modularity_LE_ZScore)) + geom_point()
+
+#Z-Score modularity compared to null graphs
+ggplot(data=Modularity.df, aes(x=reorder(PubFragmentName,-SampleSize), y=Modularity_LE_Null_ZScore)) + geom_point()
+
+#Centered modularity compared to null graphs
+ggplot(data=Modularity.df, aes(x=reorder(PubFragmentName, -SampleSize), y=Modularity_LE_Centered)) + geom_point() 
+
+#use Spearman test to see if there is a correlation between Modularity and sample size
+cor.test(y=Modularity.df$Modularity_LE, x=Modularity.df$SampleSize,  method = "spearman")
+
+```
+
+##Estimate Betweenness Centrality and Degree of each node
+The vertex and edge betweenness are (roughly) defined by the number of geodesics (shortest paths) going through a vertex or an edge.
+
+Estimate the betweenness centrality for each node in each network
+
+```{r Betweenness Centrality}
+
+bt<-lapply(seBM_graph, function(x) betweenness(x, directed=F, weights=NA))
+
+```
+
+Plot the Betweenness detected for each fragment and plot against fragment decreasing by area and isolation
+
+```{r  format dataframe for betweenness info}
+#Create a betweenness dataframe
+Betweenness.df<-data.frame(lapply(bt, "length<-", max(lengths(bt))))
+table(is.na(Betweenness.df))
+#melt the dataframe and create a uniqe row for each ASV
+Betweenness.df.melt<-reshape2::melt(Betweenness.df)
+Betweenness.df.melt$ASV<-rep(row.names(Betweenness.df),ncol(Betweenness.df))
+#Add the fragment name
+Betweenness.df.melt$PubFragmentName<-as.factor(substring(Betweenness.df.melt$variable,6))
+colnames(Betweenness.df.melt)<-c("Graph", "VertexBetweenness", "ASV","PubFragmentName")
+#Remove empty rows
+Betweenness.df.melt<-Betweenness.df.melt[complete.cases(Betweenness.df.melt),]
+#Add information from Modularity.df
+Betweenness.df.melt<-merge(Betweenness.df.melt, Modularity.df[,1:7], all=TRUE, by="PubFragmentName")
+
+KW.betweenness <- kruskal.test(VertexBetweenness ~ PubFragmentName, data = Betweenness.df.melt)
+KW.betweenness
+pairwise.wilcox.test(Betweenness.df.melt$VertexBetweenness, Betweenness.df.melt$PubFragmentName, p.adjust.method="BH")
+```
+
+###Plots of betweenness centrality against landscape variables and sample size
+
+Plot the interactions between betweenness centrality and landscape
+
+```{r Plots of Betweenness}
+#Increasing Isolation
+ggplot(data=Betweenness.df.melt, aes(x=reorder(PubFragmentName, Isolation_Scaled_2), y=VertexBetweenness)) + geom_point()
+
+#Decreasing Area
+#Figure 5
+ggplot(data=Betweenness.df.melt, aes(x=reorder(PubFragmentName, -Area_Scaled_2), y=VertexBetweenness)) + geom_point(aes(alpha=0.1)) + theme_bw()
+
+#Increasing Distance from Source
+ggplot(data=Betweenness.df.melt, aes(x=reorder(PubFragmentName, DtS_Scaled_2), y=VertexBetweenness)) + geom_point()
+
+#Decreasing Sample Size
+ggplot(data=Betweenness.df.melt, aes(x=reorder(PubFragmentName, -SampleSize), y=VertexBetweenness)) + geom_point()
+
+```
+
+Add betweeness centrality as a vertex attribute to the graph objects and do a spot check
+
+```{r Betweenness added to graphs}
+for (x in 1:length(bt)) {
+  V(seBM_graph[[x]])$betweenness<- as.data.frame(bt[[x]])[,1]
+  }
+V(seBM_graph$seBM.REGUA)$betweenness==as.data.frame(bt$seBM.REGUA)[,1]
+
+```
+
+###Determine Node Degree and Plot
+
+Estimate the degree of each node within each network
+
+```{r estimate degree}
+
+deg<- lapply(seBM_graph, function(x) igraph::degree(x, mode="total", loops=FALSE))
+
+```
+
+Plot the vertex degrees for each fragment ordered by area and isolation. First, create a table containing the degree information
+
+```{r format table for degree data}
+#create dataframe
+Degree.df<-data.frame(lapply(deg, "length<-", max(lengths(deg))))
+table(is.na(Degree.df))
+#melt the dataframe and create assign the unique ASV name to the appropriate rows
+Degree.df.melt<-reshape2::melt(Degree.df)
+Degree.df.melt$Fragment<-as.factor(substring(Degree.df.melt$variable,6))
+Degree.df.melt$ASV<-rep(row.names(Betweenness.df),ncol(Betweenness.df))
+colnames(Degree.df.melt)<-c("Graph", "VertexDegrees", "PubFragmentName", "ASV")
+Degree.df.melt<-Degree.df.melt[complete.cases(Degree.df.melt),]
+#Add in modularity.df data
+Degree.df.melt<-merge(Degree.df.melt, Modularity.df[,1:7], all=TRUE, by="PubFragmentName")
+```
+
+###Plots of Degree by landscape variables and Sample Size
+
+```{r plots of degree by landscape variables}
+ggplot(data=Degree.df.melt, aes(x=reorder(PubFragmentName, Isolation_Scaled_2), y=VertexDegrees)) + geom_point(alpha=0.25)
+
+ggplot(data=Degree.df.melt, aes(x=reorder(PubFragmentName, -Area_Scaled_2), y=VertexDegrees)) + geom_point(alpha=0.25)
+
+ggplot(data=Degree.df.melt, aes(x=reorder(PubFragmentName, DtS_Scaled_2), y=VertexDegrees)) + geom_point(alpha=0.25)
+
+ggplot(data=Degree.df.melt, aes(x=reorder(PubFragmentName, -SampleSize), y=VertexDegrees)) + geom_point(alpha=0.25)
+
+summary(aov(VertexDegrees ~ Isolation_Scaled_2, data=Degree.df.melt))
+summary(aov(VertexDegrees ~ Area_Scaled_2, data=Degree.df.melt))
+summary(aov(VertexDegrees ~ DtS_Scaled_2, data=Degree.df.melt))
+summary(aov(VertexDegrees ~ SampleSize, data=Degree.df.melt))
+```
+
+###Network Connectance estimate and plot
+
+Connectance is the proportion of realized interactions from the pool of all possible interactions between nodes in a network (May 1973). Estimate connectance for each site and then plot the connectance for each sampling locality split by their protection status.
+
+```{r network connectance}
+#estimate connectance
+seBM_graph_connectance<-lapply(seBM_graph, function(g) {
+  S<-vcount(g)
+  L<-ecount(g)
+  #total number of possible edges in undirected unipartite network where nodes cannot interact with themselves
+  m<-S*((S-1)/2)
+  return(L/m)
+})
+names(seBM_graph_connectance)<- names(seBM_graph)
+
+#create a dataframe
+Connectance.df<-as.data.frame(t(as.data.frame(seBM_graph_connectance)))
+colnames(Connectance.df)<-"Connectance"
+Connectance.df$HabitatType[row.names(Connectance.df) %in% c("seBM.REGUA", "seBM.REGUA2", "seBM.REGUA3")] <- "1_Protected"
+Connectance.df$HabitatType[!(row.names(Connectance.df) %in% c("seBM.REGUA", "seBM.REGUA2", "seBM.REGUA3"))] <- "2_Fragmented"
+
+#plot connectance
+pdf("/Users/kelly/Documents/Analysis/AnalysisBrazilMicrob/16SrRNA_Analysis_Brazil/SpiecEasi/Plots_28May/Connectance_by_HabType.pdf", useDingbats = FALSE)
+ggplot(data=Connectance.df, aes(x=HabitatType, y=Connectance)) + geom_boxplot() + geom_point() + geom_text(aes(label=row.names(Connectance.df)),hjust=0, vjust=0) + ylim(0,0.03) + theme_bw()
+dev.off()
+
+wilcox.test(Connectance.df$Connectance~Connectance.df$HabitatType) #0, p-value=0.01212 
+
+```
+
+##Plot the SpiecEasi networks for each fragment
+###Format graph objects for plotting
+First, add the Genus as a vertex attribute
+
+```{r genus as vertex attribute}
+#create a list of phyloseq tax_tables
+tax.tab<-lapply(BM.fragment.list, function(x) tax_table(x))
+#format each list object so that it is a dataframe and Genus is a character
+tax.tab<-lapply(tax.tab, function(x) {
+  df<-as.data.frame(x)
+  df$Genus<-as.character(df$Genus)
+  df$Genus[is.na(df$Genus)]<-" Unknown"
+  df$Genus[df$Genus==" "]<-" Unknown"
+  return(df)})
+#spot check
+tax.tab$BM.F9$Genus
+names(tax.tab) == substring(names(seBM_graph),3)
+
+#Add Genus as a vertex attribute to the graph object
+for (g in 1:length(seBM_graph)) {
+  V(seBM_graph[[g]])$Genus[V(seBM_graph[[g]])$name == row.names(tax.tab[[g]])]<-tax.tab[[g]]$Genus
+}
+V(seBM_graph$seBM.REGUA)$Genus
+
+```
+
+Assign Arsenophonous, Wolbachia, Bartonella, Candidatus Phlomobacter, Mycoplasma, Rickettsia, and all other nodes a color
+
+Create a palette our graph colors
+
+```{r graph color palette}
+library(viridis)
+se_graph_colors<-viridis(7, direction=-1)
+```
+
+Initialize Color as a vertex attribute and copy the Genus information into V(g)$Color so that we can replace Genus with the appropriate color
+
+```{r color as a vertex attribute}
+V(seBM_graph$seBM.REGUA)$Color<- V(seBM_graph$seBM.REGUA)$Genus
+V(seBM_graph$seBM.REGUA2)$Color<-V(seBM_graph$seBM.REGUA2)$Genus
+V(seBM_graph$seBM.REGUA3)$Color<-V(seBM_graph$seBM.REGUA3)$Genus
+V(seBM_graph$seBM.F2)$Color<-V(seBM_graph$seBM.F2)$Genus
+V(seBM_graph$seBM.F9)$Color<-V(seBM_graph$seBM.F9)$Genus
+V(seBM_graph$seBM.F5)$Color<-V(seBM_graph$seBM.F5)$Genus
+V(seBM_graph$seBM.F8)$Color<-V(seBM_graph$seBM.F8)$Genus
+V(seBM_graph$seBM.F7)$Color<-V(seBM_graph$seBM.F7)$Genus
+V(seBM_graph$seBM.F4)$Color<-V(seBM_graph$seBM.F4)$Genus
+V(seBM_graph$seBM.F10)$Color<-V(seBM_graph$seBM.F10)$Genus
+V(seBM_graph$seBM.F1)$Color<-V(seBM_graph$seBM.F1)$Genus
+
+```
+
+Replace the Genus in V(g)$Color with the appropriate color from the color palette
+
+```{r}
+#Create a list of genera for which colors assigned
+TargetGenera<-c(" Arsenophonus"," Wolbachia"," Bartonella"," Candidatus Phlomobacter"," Mycoplasma"," Rickettsia")
+
+for (g in 1:length(seBM_graph)) {
+  #change color for genera outside of TargetGenera
+  V(seBM_graph[[g]])$Color[which(!(V(seBM_graph[[g]])$Color %in% TargetGenera))]<-se_graph_colors[7]
+  #change color for each TargetGenera
+  for (c in 1:length(TargetGenera)) {
+    V(seBM_graph[[g]])$Color[which(V(seBM_graph[[g]])$Color == TargetGenera[c])]<-se_graph_colors[[c]]
+  }
+}
+
+#Spot check
+V(seBM_graph$seBM.REGUA)$Color
+V(seBM_graph$seBM.REGUA)$Genus
+
+```
+
+###Network Plots
+
+Get your plot settings how you want them using one graph as an example
+
+```{r example network plot}
+plot(seBM_graph$seBM.F10, layout=layout.fruchterman.reingold,
+     vertex.size=(scale(V(seBM_graph$seBM.F10)$betweenness, center=TRUE, scale=TRUE)+1),
+     vertex.color=V(seBM_graph$seBM.F10)$Color, vertex.label=NA, 
+     vertex.frame.color=V(seBM_graph$seBM.F10)$Color)
+
+```
+
+Now loop through all of the graphs using the same settings
+
+```{r}
+for (x in 1:length(seBM_graph)) {
+  #pdf(paste0("/Users/kelly/Documents/Analysis/AnalysisBrazilMicrob/16SrRNA_Analysis_Brazil/SpiecEasi/Plots_28May/", names(seBM_graph)[x], ".pdf"), height=7.5, width=10, useDingbats = FALSE)
+  plot(seBM_graph[[x]], layout=layout.fruchterman.reingold,
+       vertex.size=(scale(V(seBM_graph[[x]])$betweenness, center=TRUE, scale = TRUE) + 1), 
+       vertex.color=V(seBM_graph[[x]])$Color, vertex.label=NA, 
+       vertex.frame.color=V(seBM_graph[[x]])$Color)
+  #dev.off()
+}
+```
+
+##Network Estimation for Species-Specific Networks
+
+First, we need to make within-species networks, 2 per species: 1 within REGUA and 1 outside REGUA. Start by making phyloseq objects. Below is a plot illustrating sample size by species. We select only those species with greater than 5 samples in each habitat type.
+
+```{r plot sample size by species}
+#vizualize which species have the highest sample sizes. Need at least 5 individuals in each 
+#the protected and fragmented habitats
+metadata_REGArea<-metadata_complete[metadata_complete$Region!="LIMI",]
+ggplot(data=metadata_REGArea, aes(x=HabitatType)) + geom_bar(stat="count") + facet_wrap(~ParasiteSpecies)
+
+```
+
+Below we make the phyloseq objects
+
+```{r phyloseq objects for well-sampled species}
+#Subsample the BM.REGArea object for specific species
+ParaLong <- subset_samples(BM.REGArea, ParasiteSpecies=="Paratrichobius longicrus")
+AspiFalc <- subset_samples(BM.REGArea, ParasiteSpecies=="Aspidoptera falcata")
+BasiJuqu <- subset_samples(BM.REGArea, ParasiteSpecies=="Basilia juquiensis")
+StreWied <- subset_samples(BM.REGArea, ParasiteSpecies=="Strebla wiedemanni")
+
+#Separate each species' phyloseq object into samples from protected and fragmented habitat
+#then remove the ASVs that don't occur in any sample within each new phyloseq object
+ParaLong.Protected<- subset_samples(ParaLong, HabitatType=="Protected")
+ParaLong.Protected<- prune_taxa(taxa_sums(ParaLong.Protected)>0, ParaLong.Protected)
+ParaLong.Protected
+
+ParaLong.Fragmented<- subset_samples(ParaLong, HabitatType=="Fragmented")
+ParaLong.Fragmented<- prune_taxa(taxa_sums(ParaLong.Fragmented)>0, ParaLong.Fragmented)
+ParaLong.Fragmented
+
+AspiFalc.Protected<- subset_samples(AspiFalc, HabitatType=="Protected")
+AspiFalc.Protected<- prune_taxa(taxa_sums(AspiFalc.Protected)>0, AspiFalc.Protected)
+AspiFalc.Protected
+
+AspiFalc.Fragmented<- subset_samples(AspiFalc, HabitatType=="Fragmented")
+AspiFalc.Fragmented<- prune_taxa(taxa_sums(AspiFalc.Fragmented)>0, AspiFalc.Fragmented)
+AspiFalc.Fragmented
+
+BasiJuqu.Protected<- subset_samples(BasiJuqu, HabitatType=="Protected")
+BasiJuqu.Protected<- prune_taxa(taxa_sums(BasiJuqu.Protected)>0, BasiJuqu.Protected)
+BasiJuqu.Protected
+
+BasiJuqu.Fragmented<- subset_samples(BasiJuqu, HabitatType=="Fragmented")
+BasiJuqu.Fragmented<- prune_taxa(taxa_sums(BasiJuqu.Fragmented)>0, BasiJuqu.Fragmented)
+BasiJuqu.Fragmented
+
+StreWied.Protected<- subset_samples(StreWied, HabitatType=="Protected")
+StreWied.Protected<- prune_taxa(taxa_sums(StreWied.Protected)>10, StreWied.Protected)
+StreWied.Protected
+
+StreWied.Fragmented<- subset_samples(StreWied, HabitatType=="Fragmented")
+StreWied.Fragmented<- prune_taxa(taxa_sums(StreWied.Fragmented)>0, StreWied.Fragmented)
+StreWied.Fragmented
+
+#Make a list of phyloseq objects
+Species_Phyloseq_List<-list(ParaLong.Protected,AspiFalc.Protected,BasiJuqu.Protected,StreWied.Protected,ParaLong.Fragmented,AspiFalc.Fragmented,BasiJuqu.Fragmented,StreWied.Fragmented)
+
+names(Species_Phyloseq_List)<-list("ParaLong.Protected","AspiFalc.Protected","BasiJuqu.Protected","StreWied.Protected","ParaLong.Fragmented","AspiFalc.Fragmented","BasiJuqu.Fragmented","StreWied.Fragmented")
+
+```
+
+Now, estimate networks for each of these phyloseq objects
+
+```{r species-specific networks}
+pargs<-list(rep.num=50, seed=10010, ncores=2)
+
+# se.ParaLong.Protected<- spiec.easi(ParaLong.Protected, method='mb', lambda.min.ratio=5e-3, nlambda=30, pulsar.params=pargs)
+# getStability(se.ParaLong.Protected) #0.04794139
+# sum(getRefit(se.ParaLong.Protected))/2 #59
+se.ParaLong.Protected<-readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/Species_Specific_Networks/ParaLong_Protected.RData")))
+
+#Paratrichobius longicrus
+# se.ParaLong.Fragmented<- spiec.easi(ParaLong.Fragmented, method='mb', lambda.min.ratio=5e-2, nlambda=50, pulsar.params=pargs)
+# getStability(se.ParaLong.Fragmented) #0.0488628
+# sum(getRefit(se.ParaLong.Fragmented))/2 #121
+se.ParaLong.Fragmented<-readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/Species_Specific_Networks/ParaLong_Fragmented.RData")))
+
+#Aspidoptera falcata
+# se.AspiFalc.Protected<- spiec.easi(AspiFalc.Protected, method='mb', lambda.min.ratio=5e-1, nlambda=20, pulsar.params=pargs)
+# getStability(se.AspiFalc.Protected) #0.04969663
+# sum(getRefit(se.AspiFalc.Protected))/2 #33
+se.AspiFalc.Protected<- readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/Species_Specific_Networks/AspiFalc.Protected.RData")))
+
+# se.AspiFalc.Fragmented<- spiec.easi(AspiFalc.Fragmented, method='mb', lambda.min.ratio=1e-2, nlambda=30, pulsar.params=pargs)
+# getStability(se.AspiFalc.Fragmented) #0.04752144
+# sum(getRefit(se.AspiFalc.Fragmented))/2 #54
+se.AspiFalc.Fragmented<- readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/Species_Specific_Networks/AspiFalc.Fragmented.RData")))
+
+#Basilia juquiensis
+# se.BasiJuqu.Protected<- spiec.easi(BasiJuqu.Protected, method='mb', lambda.min.ratio=1e-1, nlambda=20, pulsar.params=pargs)
+# getStability(se.BasiJuqu.Protected) #0.04799605
+# sum(getRefit(se.BasiJuqu.Protected))/2 #91
+se.BasiJuqu.Protected<- readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/Species_Specific_Networks/BasiJuqu.Protected.RData")))
+
+# se.BasiJuqu.Fragmented<- spiec.easi(BasiJuqu.Fragmented, method='mb', lambda.min.ratio=1e-2, nlambda=20, pulsar.params=pargs)
+# getStability(se.BasiJuqu.Fragmented) #0.04670821
+# sum(getRefit(se.BasiJuqu.Fragmented))/2 #108
+se.BasiJuqu.Fragmented <- readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/Species_Specific_Networks/BasiJuqu.Fragmented.RData")))
+
+#Strebla wiedemanni
+# se.StreWied.Protected<- spiec.easi(StreWied.Protected, method='mb', lambda.min.ratio=5e-3, nlambda=20, pulsar.params=pargs)
+# getStability(se.StreWied.Protected) #0.04790777
+# sum(getRefit(se.StreWied.Protected))/2 #46
+se.StreWied.Protected<- readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/Species_Specific_Networks/StreWied.Protected.RData")))
+
+# se.StreWied.Fragmented<- spiec.easi(StreWied.Fragmented, method='mb', lambda.min.ratio=1e-1, nlambda=30, pulsar.params=pargs)
+# getStability(se.StreWied.Fragmented) #0.04978955
+# sum(getRefit(se.StreWied.Fragmented))/2 #55
+se.StreWied.Fragmented<- readRDS(gzcon(url("https://github.com/kspeeriful/Microbiomes_and_Habitat_Loss_Brazil/raw/main/SpiecEasi/Species_Specific_Networks/StreWied.Fragmented.RData")))
+
+#create a list of species-specific SpiecEasi networks
+Species_SE<-list(se.ParaLong.Protected,se.AspiFalc.Protected,se.BasiJuqu.Protected,se.StreWied.Protected, se.ParaLong.Fragmented,se.AspiFalc.Fragmented,se.BasiJuqu.Fragmented,se.StreWied.Fragmented)
+
+names(Species_SE)<-c("se.ParaLong.Protected","se.AspiFalc.Protected","se.BasiJuqu.Protected","se.StreWied.Protected","se.ParaLong.Fragmented","se.AspiFalc.Fragmented","se.BasiJuqu.Fragmented","se.StreWied.Fragmented")
+
+#Also create a list of only streblid species
+Streblid_SE<-list(se.ParaLong.Protected,se.AspiFalc.Protected,se.StreWied.Protected, se.ParaLong.Fragmented,se.AspiFalc.Fragmented,se.StreWied.Fragmented)
+
+names(Streblid_SE)<-c("se.ParaLong.Protected","se.AspiFalc.Protected","se.StreWied.Protected","se.ParaLong.Fragmented","se.AspiFalc.Fragmented","se.StreWied.Fragmented")
+
+#Convert graph objects to adjacency matrices
+Species_SE_graph <- Map(function(x,y) adj2igraph(getRefit(x), vertex.attr=list(name=taxa_names(y))), Species_SE, Species_Phyloseq_List)
+
+```
+
+##Network Decomposition using Orbits
+Network decomposition using orbits allows a comparison between networks that have different sample sizes, so is a size-independent network comparison.
+
+Here, we use network decomposition to examine if there are conserved changes in network structure within Species between REGUA and outside-REGUA fragments.
+
+Decompose the species-specific networks into orbits and use PCoA to visualize the differences. We also decompose the habitat patch networks and visualize the orbit distributions using PCoA.
+
+```{r PCoA of network orbits}
+library("orca")
+
+#Below code is from Zachary Kurtz, developer of SpiecEasi
+#get refits from each network
+refits<-lapply(Species_SE, function(x) x$refit$stars)
+refits_streblid<-lapply(Streblid_SE, function(x) x$refit$stars)
+refits_fragment<-lapply(seBM.combo, function(x) x$refit$stars)
+
+#Compute graphlet correlation vectors
+gcmat <- t(sapply(refits, pulsar::gcvec))
+gcmat_streblid <- t(sapply(refits_streblid, pulsar::gcvec))
+gcmat_fragment<- t(sapply(refits_fragment, pulsar::gcvec))
+
+#embedding and plot
+mds <- cmdscale(dist(gcmat))
+mds_streblid <- cmdscale(dist(gcmat_streblid))
+mds_fragment <- cmdscale(dist(gcmat_fragment))
+
+plot(mds)
+text(mds, labels=row.names(mds))
+
+#Figure S8
+plot(mds_streblid)
+text(mds_streblid, labels=row.names(mds_streblid))
+
+#Figure 5d
+plot(mds_fragment)
+text(mds_fragment, labels=row.names(mds_fragment))
+
+#examine clusters in the data using kmeans
+#Aspidopetera falcata networks are outliers, so use 3 clusters
+clust <- kmeans(mds, 3)$cluster
+clust
+
+clust_streblid <-kmeans(mds_streblid, 3)$cluster
+clust_streblid
+
+#fragments F8 and F5 group together apart from all other fragments when using 2 clusters, when we use 3 clusters the impact of area is more aparent.
+clust_fragment <-kmeans(mds_fragment, 3)$cluster
+clust_fragment
+
+```
+
